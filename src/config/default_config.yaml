@@ -1,0 +1,60 @@
+# DNS Server configuration — generated when the config file is missing.
+# See docs/CONFIG.md for all options.
+
+server:
+  listen: ":53"                 # IPv4 UDP/TCP listen address
+  listen_ipv6: ""               # Optional IPv6 address, e.g. "[::]:53"
+  default_ttl: 300
+  default_record: false
+  default_response: "refuse"    # refuse | nxdomain | servfail
+  geo_ip_api_key: "none"        # Optional ip2location.io API fallback
+  enable_geoip_mmap: false      # false: heap index; true: file-backed mmap index
+  geoip_update_url: ""          # Direct URL to geoip.dat; empty disables updates
+  geoip_update_interval: "24h"  # Next update is based on geoip.dat mtime
+  api:
+    enabled: false
+    listen: ":3101"
+    tokens:
+      - "changeme-please-replace-with-a-secure-token"
+    # cors:
+    #   allow_origins: ["*"]
+    #   allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    #   allow_headers: ["Content-Type", "Authorization"]
+    #   expose_headers: []
+    #   max_age: 0
+    #   allow_credentials: false
+
+# Leave cluster unset for standalone operation.
+# cluster:
+#   mode: master
+#   slaves: ["ns2.example.com"]
+# Or:
+# cluster:
+#   mode: slave
+#   master: "ns1.example.com"
+
+# Query and EDNS history. SQLite is suitable for a standalone server.
+# Set type: postgres and configure host/user/password/db_name to use PostgreSQL.
+database:
+  type: "sqlite"
+  sqlite_path: "queries.db"     # Relative to this config file
+  # host: "127.0.0.1:5432"
+  # user: "dns"
+  # password: "replace-this-password"
+  # db_name: "dns_db"
+
+zones: {}
+# Example zone:
+# zones:
+#   example.com:
+#     default:
+#       a: ["192.0.2.10"]
+#       aaaa: ["2001:db8::10"]
+#       mx: ["10 mail.example.com."]
+#       ns: ["ns1.example.com."]
+#       txt: ["v=spf1 mx -all"]
+#       other:
+#         - "SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"
+#     ttl: 300
+#     record: false
+#     fast_open: false

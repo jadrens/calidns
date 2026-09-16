@@ -1,0 +1,8 @@
+/local/
+
+# Previous root-level locations; keep them out of future commits.
+/config.yaml
+/geo_cache.db*
+/queries.db*
+/geoip.dat
+/dns-server
