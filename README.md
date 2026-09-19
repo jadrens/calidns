@@ -69,9 +69,9 @@ Some GeoIP tests start a local HTTP test server and therefore require loopback s
 
 ## Releases
 
-On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. The script requires Go, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. The packages install `dns-server` in `/usr/bin`, where it uses `/etc/calidns/config.yaml` by default. The `.tar.zst` contains the binary, README, and license; the musl `.bin` is a standalone binary.
+On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. On amd64 it also uses Bun and Vite to create the architecture-independent `calidns-dashboard_1.2.3.tar.zst` static dashboard package. Initialize the `dashboard` submodule first. The script requires Go, Bun on amd64, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. The server packages install `dns-server` in `/usr/bin`, where it uses `/etc/calidns/config.yaml` by default. The dashboard archive can be extracted into any static web root; configure that host to fall back to `index.html` for client-side routes.
 
-To publish on GitHub, push an existing tag such as `v1.2.3`, then start **Publish release** from the Actions tab and enter the tag. The workflow builds both Linux architectures, runs the Go tests, generates SHA-256 checksums, and publishes the assets to a GitHub release.
+To publish on GitHub, push an existing tag such as `v1.2.3`, then start **Publish release** from the Actions tab and enter the tag. The workflow builds both Linux server architectures and the Vite dashboard, runs their tests, generates SHA-256 checksums, and publishes all assets to a GitHub release.
 
 ## License
 

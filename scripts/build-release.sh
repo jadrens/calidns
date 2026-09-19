@@ -100,8 +100,37 @@ EOF
     -o "$dist/dns-server_${release}_linux_${arch}_musl.bin" ./src
 }
 
+build_dashboard() {
+  require bun tar zstd
+  [[ -f dashboard/package.json && -f dashboard/bun.lock ]] || {
+    echo 'Dashboard submodule is missing. Run: git submodule update --init --recursive' >&2
+    exit 1
+  }
+
+  (
+    cd dashboard
+    bun install --frozen-lockfile
+    bun run build
+  )
+
+  local dashboard_stage="$work/dashboard-archive/calidns-dashboard"
+  mkdir -p "$dashboard_stage"
+  cp -a dashboard/dist/. "$dashboard_stage/"
+  install -m 0644 dashboard/README.md "$dashboard_stage/README.md"
+  install -m 0644 dashboard/LICENSE "$dashboard_stage/LICENSE"
+  tar -cf - -C "$work/dashboard-archive" calidns-dashboard | \
+    zstd -q -f -T0 -19 -o "$dist/calidns-dashboard_${release}.tar.zst"
+}
+
 build_linux
+
+# The Vite output is architecture-independent. Build it once in the amd64
+# release job to avoid uploading the same asset from both matrix jobs.
+if [[ $arch == amd64 ]]; then
+  build_dashboard
+fi
 
 echo 'Release assets:'
 find "$dist" -maxdepth 1 -type f -name "dns-server_${release}_*" -print
 find "$dist" -maxdepth 1 -type f -name "dns-server-${release}-*" -print
+find "$dist" -maxdepth 1 -type f -name "calidns-dashboard_${release}.*" -print
