@@ -2,7 +2,7 @@
 
 [README](../README.md) · [English](CONFIG_EN.md) · [API 文档](API.md)
 
-源码入口位于 `src/`，可在项目根目录执行 `mkdir -p local && go build -o local/dns-server ./src` 构建。直接运行的二进制程序默认读取当前工作目录的 `config.yaml`；系统安装的程序使用 `/etc/calidns/config.yaml`。也可以用 `./local/dns-server -config /path/to/config.yaml` 指定路径。文件不存在时，程序会从编入二进制的 [默认模板](../src/config/default_config.yaml) 生成配置，并填入活动的非回环 IP 地址（默认使用本地 SQLite）；已有文件不会被覆盖。手动修改 YAML 后需重启服务；通过 [HTTP API](API.md) 更新的 Zone 会即时生效，并写回配置文件。
+源码入口位于 `src/`，可在项目根目录执行 `mkdir -p local && go build -o local/calidns ./src` 构建。直接运行的二进制程序默认读取当前工作目录的 `config.yaml`；系统安装的程序使用 `/etc/calidns/config.yaml`。也可以用 `./local/calidns -config /path/to/config.yaml` 指定路径。文件不存在时，程序会从编入二进制的 [默认模板](../src/config/default_config.yaml) 生成配置，并填入活动的非回环 IP 地址（默认使用本地 SQLite）；已有文件不会被覆盖。手动修改 YAML 后需重启服务；通过 [HTTP API](API.md) 更新的 Zone 会即时生效，并写回配置文件。
 
 ## 完整示例
 

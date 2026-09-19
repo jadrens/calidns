@@ -1,4 +1,4 @@
-# DNS Server
+# CaliDNS
 
 A Go authoritative DNS server with GeoIP-aware responses, a management API, and optional query logging.
 
@@ -12,12 +12,22 @@ Install the latest release on Linux amd64 or arm64:
 curl -fsSL https://raw.githubusercontent.com/jadrens/calidns/main/scripts/install.sh | sudo bash
 ```
 
-The installer detects the distribution and architecture, verifies the release checksum, and chooses the native `.deb` or `.rpm` package where supported. Alpine, Arch, and other Linux distributions receive the static musl binary. It also creates `/etc/calidns`, then enables and starts a `calidns` service with systemd or OpenRC when either is active.
+The installer detects the distribution and architecture, verifies the release checksum, and chooses the native `.deb` or `.rpm` package where supported. Alpine, Arch, and other Linux distributions receive the static musl binary. It also creates `/etc/calidns` and installs a systemd or OpenRC service definition when either init system is active. It does not enable, start, restart, or stop the service; existing service state is unchanged. On a new installation, start it explicitly when ready, and its first start will generate `/etc/calidns/config.yaml`.
 
 The generated configuration is `/etc/calidns/config.yaml`. To install a specific release, set `CALIDNS_VERSION`, for example:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jadrens/calidns/main/scripts/install.sh | sudo CALIDNS_VERSION=v1.2.3 bash
+```
+
+Start the installed service when ready:
+
+```sh
+# systemd
+sudo systemctl start calidns
+
+# OpenRC
+sudo rc-service calidns start
 ```
 
 ## Build and run
@@ -26,8 +36,8 @@ Requirements: Go 1.26.4 (as specified in [go.mod](go.mod)) and a C compiler with
 
 ```sh
 mkdir -p local
-go build -o local/dns-server ./src
-./local/dns-server
+go build -o local/calidns ./src
+./local/calidns
 ```
 
 On first start, a directly run binary generates `config.yaml` in its current working directory. A binary installed in a system bin directory uses `/etc/calidns/config.yaml`. The file is generated from the embedded [default template](src/config/default_config.yaml), with port 53 listeners for the machine's active non-loopback IP addresses. Existing files are not overwritten. Use `-config /path/to/config.yaml` to select another file; GeoIP data and the Geo cache are stored beside that file, and a relative `database.sqlite_path` is resolved from its directory.
@@ -69,7 +79,7 @@ Some GeoIP tests start a local HTTP test server and therefore require loopback s
 
 ## Releases
 
-On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. On amd64 it also uses Bun and Vite to create the architecture-independent `calidns-dashboard_1.2.3.tar.zst` static dashboard package. Initialize the `dashboard` submodule first. The script requires Go, Bun on amd64, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. The server packages install `dns-server` in `/usr/bin`, where it uses `/etc/calidns/config.yaml` by default. The dashboard archive can be extracted into any static web root; configure that host to fall back to `index.html` for client-side routes.
+On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `calidns` `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. On amd64 it also uses Bun and Vite to create the architecture-independent `calidns-dashboard_1.2.3.tar.zst` static dashboard package. Initialize the `dashboard` submodule first. The script requires Go, Bun on amd64, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. Native packages install `/usr/bin/calidns` and a `calidns.service` definition, but do not enable or start it. The dashboard archive can be extracted into any static web root; configure that host to fall back to `index.html` for client-side routes.
 
 To publish on GitHub, first commit and push the release changes to `main`, then create and push a tag pointing at that commit, for example `git tag v1.2.3 && git push origin main v1.2.3`. From the Actions tab, run **Publish release** from `main` and enter the tag. The workflow verifies that the remote tag exists, builds both Linux server architectures and the Vite dashboard from that tag, runs their tests, generates SHA-256 checksums, and publishes all assets to a GitHub release.
 

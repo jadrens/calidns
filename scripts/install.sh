@@ -4,6 +4,7 @@ set -euo pipefail
 repo=${CALIDNS_REPOSITORY:-jadrens/calidns}
 requested_version=${CALIDNS_VERSION:-latest}
 config_dir=/etc/calidns
+curl_args=(--fail --location --retry 1 --retry-delay 1 --connect-timeout 5 --max-time 15)
 
 log() {
   printf '[calidns] %s\n' "$*"
@@ -52,11 +53,14 @@ case $distro_family in
   *) install_kind=binary ;;
 esac
 
+tag=
 if [[ $requested_version == latest ]]; then
-  log "detecting the latest release"
-  release_page=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") || \
+  log 'detecting the latest release'
+  release_page=$(curl "${curl_args[@]}" -sS -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") || \
     fail "could not find the latest release for $repo"
-  tag=${release_page##*/}
+  tag=${release_page%%\?*}
+  tag=${tag%/}
+  tag=${tag##*/}
 else
   tag=$requested_version
   [[ $tag == v* ]] || tag="v$tag"
@@ -66,9 +70,9 @@ version=${tag#v}
 base_url="https://github.com/$repo/releases/download/$tag"
 
 case $install_kind in
-  deb) asset="dns-server_${version}_${release_arch}.deb" ;;
-  rpm) asset="dns-server-${version}-1.${rpm_arch}.rpm" ;;
-  binary) asset="dns-server_${version}_linux_${release_arch}_musl.bin" ;;
+  deb) asset="calidns_${version}_${release_arch}.deb" ;;
+  rpm) asset="calidns-${version}-1.${rpm_arch}.rpm" ;;
+  binary) asset="calidns_${version}_linux_${release_arch}_musl.bin" ;;
 esac
 
 work_dir=$(mktemp -d)
@@ -78,8 +82,8 @@ asset_path="$work_dir/$asset"
 checksums_path="$work_dir/SHA256SUMS"
 
 log "detected $distro on $release_arch; downloading $asset"
-curl -fL --retry 3 --retry-delay 2 -o "$asset_path" "$base_url/$asset"
-curl -fL --retry 3 --retry-delay 2 -o "$checksums_path" "$base_url/SHA256SUMS"
+curl "${curl_args[@]}" -sS -o "$checksums_path" "$base_url/SHA256SUMS"
+curl "${curl_args[@]}" -sS -o "$asset_path" "$base_url/$asset"
 
 expected_checksum=$(awk -v name="$asset" '$2 == name || $2 == ("*" name) { print $1; exit }' "$checksums_path")
 [[ -n $expected_checksum ]] || fail "$asset is not listed in SHA256SUMS"
@@ -102,7 +106,7 @@ case $install_kind in
     else
       fail 'no Debian package installer was found'
     fi
-    binary_path=/usr/bin/dns-server
+    binary_path=/usr/bin/calidns
     ;;
   rpm)
     if command -v dnf >/dev/null 2>&1; then
@@ -116,15 +120,15 @@ case $install_kind in
     else
       fail 'no RPM package installer was found'
     fi
-    binary_path=/usr/bin/dns-server
+    binary_path=/usr/bin/calidns
     ;;
   binary)
-    install -D -m 0755 "$asset_path" /usr/local/bin/dns-server
-    binary_path=/usr/local/bin/dns-server
+    install -D -m 0755 "$asset_path" /usr/local/bin/calidns
+    binary_path=/usr/local/bin/calidns
     ;;
 esac
 
-[[ -x $binary_path ]] || fail "dns-server was not installed at $binary_path"
+[[ -x $binary_path ]] || fail "calidns was not installed at $binary_path"
 
 service_user=root
 service_group=root
@@ -148,7 +152,7 @@ if [[ $service_user == calidns ]]; then
   chown -R "$service_user:$service_group" "$config_dir"
 fi
 
-installed_service=false
+installed_service=
 if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
   log 'installing systemd service'
   cat > /etc/systemd/system/calidns.service <<EOF
@@ -177,9 +181,7 @@ ReadWritePaths=$config_dir
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable calidns.service
-  systemctl restart calidns.service
-  installed_service=true
+  installed_service=systemd
 elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
   openrc_user=root
   openrc_group=root
@@ -204,19 +206,23 @@ depend() {
 }
 EOF
   chmod 0755 /etc/init.d/calidns
-  rc-update add calidns default
-  if rc-service calidns status >/dev/null 2>&1; then
-    rc-service calidns restart
-  else
-    rc-service calidns start
-  fi
-  installed_service=true
+  installed_service=openrc
 fi
 
 log "installed CaliDNS $tag at $binary_path"
 log "configuration: $config_dir/config.yaml"
-if [[ $installed_service == true ]]; then
-  log 'the calidns service is enabled and running'
-else
-  log "no supported init system is active; start it with: $binary_path -config $config_dir/config.yaml"
-fi
+case $installed_service in
+  systemd)
+    log 'the systemd service was installed; its enabled and running state was not changed'
+    log 'start it manually: systemctl start calidns'
+    log 'enable it at boot: systemctl enable calidns'
+    ;;
+  openrc)
+    log 'the OpenRC service was installed; its enabled and running state was not changed'
+    log 'start it manually: rc-service calidns start'
+    log 'enable it at boot: rc-update add calidns default'
+    ;;
+  *)
+    log "no supported init system is active; start it with: $binary_path -config $config_dir/config.yaml"
+    ;;
+esac

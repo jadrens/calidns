@@ -31,13 +31,14 @@ require() {
 build_linux() {
   require go musl-gcc dpkg-deb rpmbuild tar zstd
 
-  local binary="$work/dns-server"
+  local binary="$work/calidns"
   CGO_ENABLED=1 GOOS=linux GOARCH="$arch" go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$binary" ./src
 
   local stage="$work/deb"
-  install -D -m 0755 "$binary" "$stage/usr/bin/dns-server"
-  install -D -m 0644 README.md "$stage/usr/share/doc/dns-server/README.md"
-  install -D -m 0644 LICENSE "$stage/usr/share/doc/dns-server/copyright"
+  install -D -m 0755 "$binary" "$stage/usr/bin/calidns"
+  install -D -m 0644 scripts/calidns.service "$stage/lib/systemd/system/calidns.service"
+  install -D -m 0644 README.md "$stage/usr/share/doc/calidns/README.md"
+  install -D -m 0644 LICENSE "$stage/usr/share/doc/calidns/copyright"
 
   local deb_arch rpm_arch
   case "$arch" in
@@ -46,50 +47,81 @@ build_linux() {
   esac
   mkdir -p "$stage/DEBIAN"
   cat > "$stage/DEBIAN/control" <<EOF
-Package: dns-server
+Package: calidns
 Version: $release
 Section: net
 Priority: optional
 Architecture: $deb_arch
 Maintainer: jadrens <jadren@jadren.dev>
+Conflicts: dns-server
+Replaces: dns-server
+Provides: dns-server
 Description: Authoritative DNS server with GeoIP-aware responses
 EOF
-  dpkg-deb --build --root-owner-group "$stage" "$dist/dns-server_${release}_${deb_arch}.deb"
+  cat > "$stage/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0
+EOF
+  cat > "$stage/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0
+EOF
+  chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/postrm"
+  dpkg-deb --build --root-owner-group "$stage" "$dist/calidns_${release}_${deb_arch}.deb"
 
   mkdir -p "$work/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-  cat > "$work/rpmbuild/SPECS/dns-server.spec" <<EOF
-Name: dns-server
+  cat > "$work/rpmbuild/SPECS/calidns.spec" <<EOF
+Name: calidns
 Version: $release
 Release: 1
 Summary: Authoritative DNS server with GeoIP-aware responses
 License: GPL-3.0-only
 BuildArch: $rpm_arch
+Obsoletes: dns-server < $release-1
+Provides: dns-server = $release-1
 
 %description
 Authoritative DNS server with GeoIP-aware responses and a management API.
 
 %install
-install -D -m 0755 $binary %{buildroot}/usr/bin/dns-server
-install -D -m 0644 $root/README.md %{buildroot}/usr/share/doc/dns-server/README.md
-install -D -m 0644 $root/LICENSE %{buildroot}/usr/share/doc/dns-server/LICENSE
+install -D -m 0755 $binary %{buildroot}/usr/bin/calidns
+install -D -m 0644 $root/scripts/calidns.service %{buildroot}/usr/lib/systemd/system/calidns.service
+install -D -m 0644 $root/README.md %{buildroot}/usr/share/doc/calidns/README.md
+install -D -m 0644 $root/LICENSE %{buildroot}/usr/share/doc/calidns/LICENSE
+
+%post
+systemctl daemon-reload >/dev/null 2>&1 || :
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || :
 
 %files
-/usr/bin/dns-server
-/usr/share/doc/dns-server/README.md
-/usr/share/doc/dns-server/LICENSE
+/usr/bin/calidns
+/usr/lib/systemd/system/calidns.service
+/usr/share/doc/calidns/README.md
+/usr/share/doc/calidns/LICENSE
 EOF
   mkdir -p "$work/rpmdb" "$work/rpmtmp"
   rpmbuild -bb \
     --define "_topdir $work/rpmbuild" \
     --define "_dbpath $work/rpmdb" \
     --define "_tmppath $work/rpmtmp" \
-    "$work/rpmbuild/SPECS/dns-server.spec"
-  cp "$work/rpmbuild/RPMS/$rpm_arch/dns-server-$release-1.$rpm_arch.rpm" "$dist/"
+    "$work/rpmbuild/SPECS/calidns.spec"
+  cp "$work/rpmbuild/RPMS/$rpm_arch/calidns-$release-1.$rpm_arch.rpm" "$dist/"
 
-  install -D -m 0755 "$binary" "$work/archive/dns-server/dns-server"
-  install -D -m 0644 README.md "$work/archive/dns-server/README.md"
-  install -D -m 0644 LICENSE "$work/archive/dns-server/LICENSE"
-  tar -cf - -C "$work/archive" dns-server | zstd -q -f -T0 -19 -o "$dist/dns-server_${release}_linux_${arch}.tar.zst"
+  install -D -m 0755 "$binary" "$work/archive/calidns/calidns"
+  install -D -m 0644 scripts/calidns.service "$work/archive/calidns/calidns.service"
+  install -D -m 0644 README.md "$work/archive/calidns/README.md"
+  install -D -m 0644 LICENSE "$work/archive/calidns/LICENSE"
+  tar -cf - -C "$work/archive" calidns | zstd -q -f -T0 -19 -o "$dist/calidns_${release}_linux_${arch}.tar.zst"
 
   # SQLite uses CGO, so the portable binary needs a musl C compiler too.
   # Prefer the system GCC when a PATH shim named gcc does not support -specs.
@@ -97,7 +129,7 @@ EOF
   if [[ -z ${REALGCC:-} && -x /usr/bin/gcc ]]; then real_gcc=/usr/bin/gcc; fi
   REALGCC="$real_gcc" CGO_ENABLED=1 GOOS=linux GOARCH="$arch" CC=musl-gcc CGO_LDFLAGS=-static \
     go build -buildvcs=false -trimpath -ldflags='-s -w' \
-    -o "$dist/dns-server_${release}_linux_${arch}_musl.bin" ./src
+    -o "$dist/calidns_${release}_linux_${arch}_musl.bin" ./src
 }
 
 build_dashboard() {
@@ -131,6 +163,6 @@ if [[ $arch == amd64 ]]; then
 fi
 
 echo 'Release assets:'
-find "$dist" -maxdepth 1 -type f -name "dns-server_${release}_*" -print
-find "$dist" -maxdepth 1 -type f -name "dns-server-${release}-*" -print
+find "$dist" -maxdepth 1 -type f -name "calidns_${release}_*" -print
+find "$dist" -maxdepth 1 -type f -name "calidns-${release}-*" -print
 find "$dist" -maxdepth 1 -type f -name "calidns-dashboard_${release}.*" -print

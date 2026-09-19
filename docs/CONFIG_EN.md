@@ -2,7 +2,7 @@
 
 [README](../README.md) · [API reference](API_EN.md) · [中文](CONFIG.md)
 
-The Go entry point is in `src/`. From the repository root, build with `mkdir -p local && go build -o local/dns-server ./src`. A directly run binary uses `config.yaml` in the current working directory; a system-installed binary uses `/etc/calidns/config.yaml`. Use `./local/dns-server -config /path/to/config.yaml` to select another file. If missing, the server creates it from the [template embedded in the binary](../src/config/default_config.yaml), filling in active non-loopback IP addresses and defaulting to SQLite. An existing file is never overwritten.
+The Go entry point is in `src/`. From the repository root, build with `mkdir -p local && go build -o local/calidns ./src`. A directly run binary uses `config.yaml` in the current working directory; a system-installed binary uses `/etc/calidns/config.yaml`. Use `./local/calidns -config /path/to/config.yaml` to select another file. If missing, the server creates it from the [template embedded in the binary](../src/config/default_config.yaml), filling in active non-loopback IP addresses and defaulting to SQLite. An existing file is never overwritten.
 
 The default `config.yaml` and database files in the repository root are ignored by Git. `local/` remains available for local binaries and data. Manual YAML changes require a restart. Zone changes made through the [HTTP API](API_EN.md) take effect immediately and are saved to the configuration file.
 

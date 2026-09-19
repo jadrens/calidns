@@ -4,9 +4,9 @@ import "testing"
 
 func TestDefaultConfigPath(t *testing.T) {
 	for _, tc := range []struct{ executable, workdir, want string }{
-		{"/usr/bin/dns-server", "/tmp/run", "/etc/calidns/config.yaml"},
-		{"/usr/local/bin/dns-server", "/tmp/run", "/etc/calidns/config.yaml"},
-		{"/tmp/dns-server", "/tmp/run", "/tmp/run/config.yaml"},
+		{"/usr/bin/calidns", "/tmp/run", "/etc/calidns/config.yaml"},
+		{"/usr/local/bin/calidns", "/tmp/run", "/etc/calidns/config.yaml"},
+		{"/tmp/calidns", "/tmp/run", "/tmp/run/config.yaml"},
 	} {
 		if got := defaultConfigPath(tc.executable, tc.workdir); got != tc.want {
 			t.Errorf("defaultConfigPath(%q, %q) = %q, want %q", tc.executable, tc.workdir, got, tc.want)
