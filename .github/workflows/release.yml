@@ -16,8 +16,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Expected a tag like v1.2.3' >&2
+            exit 1
+          }
+          gh api --silent "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" || {
+            echo "Tag $RELEASE_TAG does not exist in $GH_REPO. Push it before running this workflow." >&2
+            exit 1
+          }
+
   build:
     name: Build ${{ matrix.name }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -28,20 +48,12 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - name: Check release tag
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo 'Expected a tag like v1.2.3' >&2
-            exit 1
-          }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -66,7 +78,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: bash scripts/build-release.sh "$RELEASE_TAG"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.name }}
           path: dist/*
@@ -79,7 +91,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist
