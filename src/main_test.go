@@ -25,3 +25,15 @@ func TestNewDNSServers(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultDataDir(t *testing.T) {
+	for _, tc := range []struct{ config, want string }{
+		{"/etc/calidns/config.yaml", "/var/lib/calidns"},
+		{"/tmp/calidns/config.yaml", "/tmp/calidns"},
+		{"config.yaml", "."},
+	} {
+		if got := defaultDataDir(tc.config); got != tc.want {
+			t.Errorf("defaultDataDir(%q) = %q, want %q", tc.config, got, tc.want)
+		}
+	}
+}

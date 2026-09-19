@@ -4,10 +4,6 @@
 server:
   # Generated from active, non-loopback interfaces at first start.
   listen: []
-  default_ttl: 300
-  default_record: false
-  default_response: "refuse"    # refuse | nxdomain | servfail
-  geo_ip_api_key: "none"        # Optional ip2location.io API fallback
   enable_geoip_mmap: false      # false: heap index; true: file-backed mmap index
   geoip_update_url: ""          # Direct URL to geoip.dat; empty disables updates
   geoip_update_interval: "24h"  # Next update is based on geoip.dat mtime
@@ -37,25 +33,16 @@ server:
 # Set type: postgres and configure host/user/password/db_name to use PostgreSQL.
 database:
   type: "sqlite"
-  sqlite_path: "queries.db"     # Relative to this config file
+  sqlite_path: "queries.db"     # Relative to the data directory
   # host: "127.0.0.1:5432"
   # user: "dns"
   # password: "replace-this-password"
   # db_name: "dns_db"
 
-zones: {}
-# Example zone:
-# zones:
-#   example.com:
-#     mode: "simple"           # simple: exact domain; golang: Go regular expression
-#     default:
-#       a: ["192.0.2.10"]
-#       aaaa: ["2001:db8::10"]
-#       mx: ["10 mail.example.com."]
-#       ns: ["ns1.example.com."]
-#       txt: ["v=spf1 mx -all"]
-#       other:
-#         - "SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"
-#     ttl: 300
-#     record: false
-#     fast_open: false
+# Optional bundled commercial GeoIP fallback. Its vendor-specific code and
+# configuration are isolated in the external_api package.
+external_api:
+  geo_ip_api_key: "none"
+
+# DNS zones and Web-API-managed defaults live in the data directory's dns_data.db.
+# A new database starts with TTL 300, recording disabled, and REFUSED replies.

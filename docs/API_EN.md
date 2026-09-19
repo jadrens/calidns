@@ -54,7 +54,7 @@ GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API
 
 ### Server defaults
 
-`GET /api/server` returns the current `listen`, `default_ttl`, `default_response`, `default_record`, `geo_ip_api_key`, `enable_geoip_mmap`, `geoip_update_url`, and `geoip_update_interval` values.
+`GET /api/server` returns the current `listen`, `default_ttl`, `default_response`, `default_record`, `enable_geoip_mmap`, `geoip_update_url`, and `geoip_update_interval` values.
 
 `PUT /api/server` accepts any subset of these writable fields:
 
@@ -63,7 +63,6 @@ GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API
 | `default_ttl` | integer | Must be greater than zero; updates the resolver immediately. |
 | `default_response` | string | `refuse`, `nxdomain`, or `servfail`. |
 | `default_record` | boolean | Enables or disables default query recording. |
-| `geo_ip_api_key` | string | Saves the configured ip2location.io fallback key; restart to ensure the active Geo lookuper uses it. |
 
 ```json
 {
@@ -73,7 +72,7 @@ GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API
 }
 ```
 
-Success returns `{"status":"ok"}`. Invalid values or a body with no writable fields return `400`. Accepted changes are saved to the active configuration file and forwarded by a master to configured slaves. Listener addresses, mmap mode, and update settings are read-only through this endpoint.
+Success returns `{"status":"ok"}`. Invalid values or a body with no writable fields return `400`. Accepted changes are saved to the data directory's `dns_data.db` (`/var/lib/calidns/dns_data.db` for package installs) and forwarded by a master to configured slaves. `config.yaml` is not rewritten.
 
 ### Zones
 

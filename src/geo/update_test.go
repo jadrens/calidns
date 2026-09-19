@@ -42,7 +42,7 @@ func TestGeoIPUpdateReplacesFileAndLiveIndex(t *testing.T) {
 				_, _ = w.Write(newData)
 			}))
 			defer server.Close()
-			l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, "none", path, mmap, "", 0)
+			l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, nil, path, mmap, "", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,7 +90,7 @@ func TestGeoIPUpdateRejectsInvalidDownload(t *testing.T) {
 		_, _ = w.Write([]byte("not a geoip.dat file"))
 	}))
 	defer server.Close()
-	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, "none", path, true, "", 0)
+	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, nil, path, true, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestGeoIPUpdateLoopRunsWhenMtimeExpired(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, "none", path, false, server.URL, time.Hour)
+	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, nil, path, false, server.URL, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestGeoIPUpdateLoopRecoversMissingFile(t *testing.T) {
 		_, _ = w.Write(datGroup("CA", "1.2.0.0/16"))
 	}))
 	defer server.Close()
-	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, "none", path, true, server.URL, time.Hour)
+	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, nil, path, true, server.URL, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

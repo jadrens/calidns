@@ -8,8 +8,10 @@ Type=simple
 DynamicUser=yes
 ConfigurationDirectory=calidns
 ConfigurationDirectoryMode=0750
-WorkingDirectory=/etc/calidns
-ExecStart=/usr/bin/calidns -config /etc/calidns/config.yaml
+StateDirectory=calidns
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/calidns
+ExecStart=/usr/bin/calidns -config /etc/calidns/config.yaml -data-dir /var/lib/calidns
 Restart=on-failure
 RestartSec=5s
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -18,7 +20,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/etc/calidns
+ReadWritePaths=/etc/calidns /var/lib/calidns
 
 [Install]
 WantedBy=multi-user.target

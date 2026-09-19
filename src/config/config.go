@@ -16,26 +16,26 @@ import (
 
 // RecordSet holds DNS records for a single country entry.
 type RecordSet struct {
-	A     []string `yaml:"a,omitempty"`
-	AAAA  []string `yaml:"aaaa,omitempty"`
-	TXT   []string `yaml:"txt,omitempty"`
-	CNAME []string `yaml:"cname,omitempty"`
-	MX    []string `yaml:"mx,omitempty"`
-	NS    []string `yaml:"ns,omitempty"`
-	SRV   []string `yaml:"srv,omitempty"`
-	CAA   []string `yaml:"caa,omitempty"`
-	PTR   []string `yaml:"ptr,omitempty"`
-	SOA   []string `yaml:"soa,omitempty"`
-	Other []string `yaml:"other,omitempty"`
+	A     []string `yaml:"a,omitempty" json:"a,omitempty"`
+	AAAA  []string `yaml:"aaaa,omitempty" json:"aaaa,omitempty"`
+	TXT   []string `yaml:"txt,omitempty" json:"txt,omitempty"`
+	CNAME []string `yaml:"cname,omitempty" json:"cname,omitempty"`
+	MX    []string `yaml:"mx,omitempty" json:"mx,omitempty"`
+	NS    []string `yaml:"ns,omitempty" json:"ns,omitempty"`
+	SRV   []string `yaml:"srv,omitempty" json:"srv,omitempty"`
+	CAA   []string `yaml:"caa,omitempty" json:"caa,omitempty"`
+	PTR   []string `yaml:"ptr,omitempty" json:"ptr,omitempty"`
+	SOA   []string `yaml:"soa,omitempty" json:"soa,omitempty"`
+	Other []string `yaml:"other,omitempty" json:"other,omitempty"`
 }
 
 // ZoneConfig holds per-country record sets and zone-level settings.
 type ZoneConfig struct {
-	Countries map[string]*RecordSet `yaml:",inline"`
-	Mode      string                `yaml:"mode,omitempty"`
-	TTL       *int                  `yaml:"ttl,omitempty"`
-	Record    *bool                 `yaml:"record,omitempty"`
-	FastOpen  *bool                 `yaml:"fast_open,omitempty"`
+	Countries map[string]*RecordSet `yaml:",inline" json:"countries"`
+	Mode      string                `yaml:"mode,omitempty" json:"mode,omitempty"`
+	TTL       *int                  `yaml:"ttl,omitempty" json:"ttl,omitempty"`
+	Record    *bool                 `yaml:"record,omitempty" json:"record,omitempty"`
+	FastOpen  *bool                 `yaml:"fast_open,omitempty" json:"fast_open,omitempty"`
 }
 
 // APIConfig holds HTTP API server settings.
@@ -59,10 +59,9 @@ type CORSConfig struct {
 // ServerConfig holds top-level server settings.
 type ServerConfig struct {
 	Listen              []string  `yaml:"listen"`
-	DefaultTTL          int       `yaml:"default_ttl"`
-	DefaultRecord       bool      `yaml:"default_record"`
-	DefaultResponse     string    `yaml:"default_response"`
-	GeoIPAPIKey         string    `yaml:"geo_ip_api_key"`
+	DefaultTTL          int       `yaml:"-" json:"default_ttl"`
+	DefaultRecord       bool      `yaml:"-" json:"default_record"`
+	DefaultResponse     string    `yaml:"-" json:"default_response"`
 	EnableGeoIPMmap     bool      `yaml:"enable_geoip_mmap"`
 	GeoIPUpdateURL      string    `yaml:"geoip_update_url"`
 	GeoIPUpdateInterval string    `yaml:"geoip_update_interval"`
@@ -91,7 +90,7 @@ type Config struct {
 	Server   ServerConfig           `yaml:"server"`
 	Cluster  ClusterConfig          `yaml:"cluster"`
 	Database DBConfig               `yaml:"database"`
-	Zones    map[string]*ZoneConfig `yaml:"zones"`
+	Zones    map[string]*ZoneConfig `yaml:"-" json:"zones"`
 }
 
 // Load reads and parses a YAML config file.
@@ -101,83 +100,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
-	// First pass: unmarshal server + raw zones.
-	var raw struct {
-		Server   ServerConfig         `yaml:"server"`
-		Cluster  ClusterConfig        `yaml:"cluster"`
-		Database DBConfig             `yaml:"database"`
-		Zones    map[string]yaml.Node `yaml:"zones"`
-	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	cfg := &Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
-
-	cfg := &Config{
-		Server:   raw.Server,
-		Cluster:  raw.Cluster,
-		Database: raw.Database,
-		Zones:    make(map[string]*ZoneConfig, len(raw.Zones)),
-	}
-
-	// Second pass: unmarshal each zone individually to separate
-	// known country keys from the reserved ttl/record keys.
-	reserved := map[string]bool{"mode": true, "ttl": true, "record": true, "fast_open": true}
-
-	for pattern, node := range raw.Zones {
-		zc := &ZoneConfig{
-			Countries: make(map[string]*RecordSet),
-		}
-
-		// Unmarshal the zone as a generic map first.
-		var zoneMap map[string]yaml.Node
-		if err := node.Decode(&zoneMap); err != nil {
-			return nil, fmt.Errorf("parsing zone %q: %w", pattern, err)
-		}
-
-		for key, val := range zoneMap {
-			if reserved[key] {
-				switch key {
-				case "mode":
-					var mode string
-					if err := val.Decode(&mode); err != nil {
-						return nil, fmt.Errorf("parsing mode in zone %q: %w", pattern, err)
-					}
-					mode = strings.ToLower(strings.TrimSpace(mode))
-					if mode != "simple" && mode != "golang" {
-						return nil, fmt.Errorf("invalid mode %q in zone %q: must be simple or golang", mode, pattern)
-					}
-					zc.Mode = mode
-				case "ttl":
-					var t int
-					if err := val.Decode(&t); err != nil {
-						return nil, fmt.Errorf("parsing ttl in zone %q: %w", pattern, err)
-					}
-					zc.TTL = &t
-				case "record":
-					var r bool
-					if err := val.Decode(&r); err != nil {
-						return nil, fmt.Errorf("parsing record in zone %q: %w", pattern, err)
-					}
-					zc.Record = &r
-				case "fast_open":
-					var fo bool
-					if err := val.Decode(&fo); err != nil {
-						return nil, fmt.Errorf("parsing fast_open in zone %q: %w", pattern, err)
-					}
-					zc.FastOpen = &fo
-				}
-			} else {
-				// Country code entry (or "default").
-				var rs RecordSet
-				if err := val.Decode(&rs); err != nil {
-					return nil, fmt.Errorf("parsing country %q in zone %q: %w", key, pattern, err)
-				}
-				zc.Countries[key] = &rs
-			}
-		}
-
-		cfg.Zones[pattern] = zc
-	}
+	cfg.Zones = make(map[string]*ZoneConfig)
 
 	// Set defaults.
 	if len(cfg.Server.Listen) == 0 {
@@ -185,15 +112,6 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("finding default DNS listeners: %w", err)
 		}
-	}
-	if cfg.Server.DefaultTTL <= 0 {
-		cfg.Server.DefaultTTL = 300
-	}
-	if cfg.Server.DefaultResponse == "" {
-		cfg.Server.DefaultResponse = "refuse"
-	}
-	if cfg.Server.GeoIPAPIKey == "" {
-		cfg.Server.GeoIPAPIKey = "none"
 	}
 	if cfg.Server.GeoIPUpdateURL != "" {
 		u, err := url.Parse(cfg.Server.GeoIPUpdateURL)
@@ -246,30 +164,6 @@ func (c *Config) HasRecordEnabled() bool {
 
 //go:embed default_config.yaml
 var defaultConfigYAML string
-
-// Save writes the configuration back to a YAML file atomically
-// (write to temp file, then rename).
-func (c *Config) Save(path string) error {
-	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("creating temp config: %w", err)
-	}
-	enc := yaml.NewEncoder(f)
-	enc.SetIndent(2)
-	if err := enc.Encode(c); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("encoding config: %w", err)
-	}
-	enc.Close()
-	f.Close()
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("renaming config: %w", err)
-	}
-	return nil
-}
 
 // GenerateDefault writes a default configuration file to path.
 // It will not overwrite an existing file.

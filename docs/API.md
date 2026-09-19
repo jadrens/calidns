@@ -86,7 +86,6 @@ server:
     "default_ttl": 300,
     "default_response": "refuse",
     "default_record": false,
-    "geo_ip_api_key": "none",
     "enable_geoip_mmap": false,
     "geoip_update_url": "",
     "geoip_update_interval": "24h"
@@ -100,7 +99,6 @@ server:
 | `default_ttl` | int | 默认 TTL（秒），当 zone 未指定 ttl 时使用 |
 | `default_response` | string | 未匹配 zone 时的默认响应：`refuse`、`nxdomain`、`servfail` |
 | `default_record` | bool | 是否默认记录查询日志 |
-| `geo_ip_api_key` | string | ip2location.io API 兜底 Key |
 | `enable_geoip_mmap` | bool | GeoIP 索引是否使用 mmap；只读，编辑 YAML 后重启 |
 | `geoip_update_url` | string | GeoIP 自动更新地址；只读，编辑 YAML 后重启 |
 | `geoip_update_interval` | string | 基于 `geoip.dat` mtime 的更新间隔；只读，编辑 YAML 后重启 |
@@ -134,7 +132,7 @@ server:
 {"error": "default_response must be one of: refuse, nxdomain, servfail"}
 ```
 
-> 💡 修改后会自动保存到当前使用的配置文件，重启后依然生效。
+> 💡 修改后会自动保存到数据目录的 `dns_data.db`（软件包默认为 `/var/lib/calidns/dns_data.db`）；`config.yaml` 不会被改写。
 
 ---
 
@@ -267,21 +265,7 @@ GET /api/zones?pattern=%5Eaaa%5C%5C.bbb%5C%5C.com%5C%5C.%3F%24
 | `record` | bool | 否 | 是否记录查询日志到 `database` 配置的 SQLite 或 PostgreSQL |
 | `fast_open` | bool | 否 | 开启后跳过 geo 查询，直接返回 `default` 记录，日志中国家代号为 `OO` |
 
-上述记录字段在 `config.yaml` 中同名，均为字符串数组。域名目标建议写为以 `.` 结尾的完整域名；`other` 使用标准 DNS zone-file 的“类型 + RDATA”格式，不包含记录名、TTL 或 `IN`。API 会拒绝格式错误的新增记录；未配置相应查询类型时仍返回 NODATA。
-
-```yaml
-zones:
-  example.com:
-    mode: simple
-    default:
-      mx:
-        - "10 mail.example.com."
-      ns:
-        - "ns1.example.com."
-      other:
-        - "SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"
-    ttl: 300
-```
+上述记录字段均保存到 `dns_data.db`。域名目标建议写为以 `.` 结尾的完整域名；`other` 使用标准 DNS zone-file 的“类型 + RDATA”格式，不包含记录名、TTL 或 `IN`。API 会拒绝格式错误的新增记录；未配置相应查询类型时仍返回 NODATA。
 
 **响应成功** (200):
 ```json

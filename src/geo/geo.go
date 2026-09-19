@@ -3,12 +3,9 @@ package geo
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"runtime/debug"
 	"sync"
@@ -42,8 +39,7 @@ type CacheEntry struct {
 type Lookuper struct {
 	mu             sync.RWMutex
 	cache          map[uint32]*cacheEntry // key: subnet24 (first 24 bits of IPv4)
-	client         *http.Client
-	apiKey         string
+	provider       Provider
 	ttl            time.Duration
 	db             *sql.DB
 	stopCh         chan struct{}
@@ -61,10 +57,10 @@ type Lookuper struct {
 
 // NewLookuper creates a new geo lookuper.
 // dbPath is the path to the SQLite cache database file.
-// apiKey is the ip2location.io API key; "none" disables only API fallback.
+// provider is an optional vendor-neutral external fallback.
 // datPath is the path to an optional geoip.dat file. When enableMmap is true,
 // the compact lookup index is file-backed instead of retained on the Go heap.
-func NewLookuper(dbPath string, ttl time.Duration, apiKey, datPath string, enableMmap bool, updateURL string, updateInterval time.Duration) (*Lookuper, error) {
+func NewLookuper(dbPath string, ttl time.Duration, provider Provider, datPath string, enableMmap bool, updateURL string, updateInterval time.Duration) (*Lookuper, error) {
 	if updateURL != "" && (datPath == "" || updateInterval <= 0) {
 		return nil, fmt.Errorf("geoip.dat update requires a file path and positive interval")
 	}
@@ -118,8 +114,7 @@ func NewLookuper(dbPath string, ttl time.Duration, apiKey, datPath string, enabl
 
 	l := &Lookuper{
 		cache:          make(map[uint32]*cacheEntry),
-		client:         &http.Client{Timeout: 5 * time.Second},
-		apiKey:         apiKey,
+		provider:       provider,
 		ttl:            ttl,
 		db:             db,
 		stopCh:         make(chan struct{}),
@@ -183,23 +178,6 @@ func (l *Lookuper) lookupLocal(ip string) string {
 	return l.local.lookup(ip)
 }
 
-// ip2locationResponse is the JSON structure returned by api.ip2location.io on success.
-type ip2locationResponse struct {
-	IP          string `json:"ip"`
-	CountryCode string `json:"country_code"`
-	CityName    string `json:"city_name"`
-	ASN         string `json:"asn"`
-	AS          string `json:"as"`
-}
-
-// ip2locationError is the JSON structure returned by api.ip2location.io on error.
-type ip2locationError struct {
-	Error struct {
-		Code    int    `json:"error_code"`
-		Message string `json:"error_message"`
-	} `json:"error"`
-}
-
 // subnet24 extracts the first 24 bits of an IPv4 address as an integer.
 // Returns 0 and false for non-IPv4 addresses.
 func subnet24(ip string) (uint32, bool) {
@@ -232,11 +210,11 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 		if cc := l.lookupLocal(ip); cc != "" {
 			return cc, "", "", "", false, nil
 		}
-		if l.apiKey == "" || l.apiKey == "none" {
+		if l.provider == nil {
 			return "", "", "", "", false, nil
 		}
-		cc, city, asn, asName, err := l.fetchFromAPI(ip)
-		return cc, city, asn, asName, false, err
+		result, err := l.provider.Lookup(context.Background(), ip)
+		return providerValues(result, false, err)
 	}
 
 	// 1. Check in-memory cache.
@@ -281,43 +259,16 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 	if cc := l.lookupLocal(ip); cc != "" {
 		return cc, "", "", "", false, nil
 	}
-	if l.apiKey == "" || l.apiKey == "none" {
+	if l.provider == nil {
 		return "", "", "", "", false, nil
 	}
 
-	// 4. Fetch from API only if the local database has no match.
-	url := fmt.Sprintf("https://api.ip2location.io/?key=%s&ip=%s&format=json", l.apiKey, ip)
-	resp, err := l.client.Get(url)
+	// 4. Use the injected external provider only if the local database misses.
+	result, err := l.provider.Lookup(context.Background(), ip)
 	if err != nil {
-		return "", "", "", "", false, fmt.Errorf("geo lookup: %w", err)
+		return "", "", "", "", false, err
 	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", "", "", false, fmt.Errorf("geo read body: %w", err)
-	}
-
-	// Try error response first (ip2location returns {"error":{...}} with 200).
-	var errResp ip2locationError
-	if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error.Code != 0 {
-		return "", "", "", "", false, fmt.Errorf("geo API error %d: %s", errResp.Error.Code, errResp.Error.Message)
-	}
-
-	var result ip2locationResponse
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return "", "", "", "", false, fmt.Errorf("geo decode: %w", err)
-	}
-
-	// ip2location always returns 200; empty or "-" country_code means lookup failed.
-	if result.CountryCode == "" || result.CountryCode == "-" {
-		return "", "", "", "", false, fmt.Errorf("geo API: empty country_code for %s", ip)
-	}
-
-	cc := result.CountryCode
-	city = result.CityName
-	asnVal := result.ASN
-	asVal := result.AS
+	cc, city, asnVal, asVal, _, _ := providerValues(result, false, nil)
 
 	expireTime := now.Add(7 * 24 * time.Hour)
 
@@ -342,33 +293,20 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 	return cc, city, asnVal, asVal, false, nil
 }
 
-// fetchFromAPI performs a direct API lookup without caching (used for non-IPv4).
-func (l *Lookuper) fetchFromAPI(ip string) (countryCode, city, asn, asName string, err error) {
-	url := fmt.Sprintf("https://api.ip2location.io/?key=%s&ip=%s&format=json", l.apiKey, ip)
-	resp, err := l.client.Get(url)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("geo lookup: %w", err)
+func providerValues(result ProviderResult, cached bool, err error) (country, region, asn, asnName string, wasCached bool, lookupErr error) {
+	if result.CountryCode != nil {
+		country = *result.CountryCode
 	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("geo read body: %w", err)
+	if result.SubLocation != nil {
+		region = *result.SubLocation
 	}
-
-	var errResp ip2locationError
-	if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error.Code != 0 {
-		return "", "", "", "", fmt.Errorf("geo API error %d: %s", errResp.Error.Code, errResp.Error.Message)
+	if result.ASN != nil {
+		asn = *result.ASN
 	}
-
-	var result ip2locationResponse
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return "", "", "", "", fmt.Errorf("geo decode: %w", err)
+	if result.ASNName != nil {
+		asnName = *result.ASNName
 	}
-	if result.CountryCode == "" || result.CountryCode == "-" {
-		return "", "", "", "", fmt.Errorf("geo API: empty country_code for %s", ip)
-	}
-	return result.CountryCode, result.CityName, result.ASN, result.AS, nil
+	return country, region, asn, asnName, cached, err
 }
 
 // subnet24ToCIDR converts a 24-bit integer back to "x.y.z.0/24" notation.

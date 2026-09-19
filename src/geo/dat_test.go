@@ -92,7 +92,7 @@ func TestSQLiteCachePrecedesDat(t *testing.T) {
 			name = "mmap"
 		}
 		t.Run(name, func(t *testing.T) {
-			l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), 7*24*time.Hour, "none", testDatFile(t), mmap, "", 0)
+			l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), 7*24*time.Hour, nil, testDatFile(t), mmap, "", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +188,7 @@ func BenchmarkBundledDatLookup(b *testing.B) {
 }
 
 func BenchmarkSQLiteMissDatFallback(b *testing.B) {
-	l, err := NewLookuper(filepath.Join(b.TempDir(), "cache.db"), 7*24*time.Hour, "none", filepath.Join("..", "..", "local", "geoip.dat"), false, "", 0)
+	l, err := NewLookuper(filepath.Join(b.TempDir(), "cache.db"), 7*24*time.Hour, nil, filepath.Join("..", "..", "local", "geoip.dat"), false, "", 0)
 	if err != nil {
 		b.Fatal(err)
 	}

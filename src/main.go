@@ -17,8 +17,10 @@ import (
 
 	"github.com/miekg/dns"
 
+	"dns-server/external_api"
 	"dns-server/src/api"
 	"dns-server/src/config"
+	"dns-server/src/dnsdata"
 	"dns-server/src/geo"
 	"dns-server/src/handler"
 	"dns-server/src/recorder"
@@ -38,6 +40,7 @@ func newDNSServers(addresses []string) []*dns.Server {
 
 func main() {
 	configPath := flag.String("config", "", "Path to YAML configuration file")
+	dataDir := flag.String("data-dir", "", "Directory for databases and GeoIP data")
 	flag.Parse()
 	if *configPath == "" {
 		executable, err := os.Executable()
@@ -49,6 +52,9 @@ func main() {
 			log.Fatalf("Finding current directory: %v", err)
 		}
 		*configPath = defaultConfigPath(executable, workdir)
+	}
+	if *dataDir == "" {
+		*dataDir = defaultDataDir(*configPath)
 	}
 
 	// Generate default config if missing.
@@ -67,11 +73,36 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-	log.Printf("Loaded %d zones from config", len(cfg.Zones))
+	if err := os.MkdirAll(*dataDir, 0750); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
+	dataPath := filepath.Join(*dataDir, "dns_data.db")
+	dnsStore, err := dnsdata.Open(dataPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize DNS data: %v", err)
+	}
+	defer dnsStore.Close()
+	defaults, err := dnsStore.LoadDefaults()
+	if err != nil {
+		log.Fatalf("Failed to load DNS defaults: %v", err)
+	}
+	cfg.Server.DefaultTTL = defaults.TTL
+	cfg.Server.DefaultRecord = defaults.Record
+	cfg.Server.DefaultResponse = defaults.Response
+	cfg.Zones, err = dnsStore.LoadZones()
+	if err != nil {
+		log.Fatalf("Failed to load DNS zones: %v", err)
+	}
+	log.Printf("Loaded %d zones from %s", len(cfg.Zones), dataPath)
 
 	// Initialize components.
 	updateInterval, _ := time.ParseDuration(cfg.Server.GeoIPUpdateInterval)
-	geoLookup, err := geo.NewLookuper(filepath.Join(filepath.Dir(*configPath), "geo_cache.db"), 7*24*time.Hour, cfg.Server.GeoIPAPIKey, filepath.Join(filepath.Dir(*configPath), "geoip.dat"), cfg.Server.EnableGeoIPMmap, cfg.Server.GeoIPUpdateURL, updateInterval)
+	externalCfg, err := external_api.LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load external API config: %v", err)
+	}
+	geoProvider := external_api.NewIP2Location(externalCfg.GeoIPAPIKey)
+	geoLookup, err := geo.NewLookuper(filepath.Join(*dataDir, "geo_cache.db"), 7*24*time.Hour, geoProvider, filepath.Join(*dataDir, "geoip.dat"), cfg.Server.EnableGeoIPMmap, cfg.Server.GeoIPUpdateURL, updateInterval)
 	if err != nil {
 		log.Fatalf("Failed to initialize geo lookuper: %v", err)
 	}
@@ -83,7 +114,7 @@ func main() {
 		recorderType = "sqlite"
 		recorderSource = cfg.Database.SQLitePath
 		if !filepath.IsAbs(recorderSource) {
-			recorderSource = filepath.Join(filepath.Dir(*configPath), recorderSource)
+			recorderSource = filepath.Join(*dataDir, recorderSource)
 		}
 	}
 	rec, err := recorder.New(recorderType, recorderSource, geoLookup)
@@ -107,7 +138,7 @@ func main() {
 	// HTTP API server.
 	var apiSrv *http.Server
 	if cfg.Server.API.Enabled {
-		apiHandler := api.NewServer(resolverIns, rec, geoLookup, cfg.Server.API.Tokens, cfg.Server.API.CORS, cfg, *configPath)
+		apiHandler := api.NewServer(resolverIns, rec, geoLookup, cfg.Server.API.Tokens, cfg.Server.API.CORS, cfg, dnsStore)
 		apiSrv = &http.Server{
 			Addr:    cfg.Server.API.Listen,
 			Handler: apiHandler,
@@ -116,7 +147,7 @@ func main() {
 
 	// Slave mode: sync config from master on startup.
 	if cfg.Cluster.Mode == "slave" && cfg.Cluster.Master != "" {
-		if err := syncFromMaster(cfg, resolverIns, *configPath); err != nil {
+		if err := syncFromMaster(cfg, resolverIns, dnsStore); err != nil {
 			log.Printf("[cluster] slave sync failed: %v", err)
 		}
 	}
@@ -179,8 +210,15 @@ func defaultConfigPath(executable, workdir string) string {
 	}
 }
 
+func defaultDataDir(configPath string) string {
+	if filepath.Clean(filepath.Dir(configPath)) == "/etc/calidns" {
+		return "/var/lib/calidns"
+	}
+	return filepath.Dir(configPath)
+}
+
 // syncFromMaster fetches the full config from the master server and applies zones.
-func syncFromMaster(cfg *config.Config, res *resolver.Resolver, configPath string) error {
+func syncFromMaster(cfg *config.Config, res *resolver.Resolver, store *dnsdata.Store) error {
 	url := "https://" + cfg.Cluster.Master + "/api/config"
 	log.Printf("[cluster] slave: syncing config from master %s", url)
 
@@ -245,17 +283,17 @@ func syncFromMaster(cfg *config.Config, res *resolver.Resolver, configPath strin
 	cfg.Server.DefaultTTL = masterCfg.Server.DefaultTTL
 	cfg.Server.DefaultRecord = masterCfg.Server.DefaultRecord
 	cfg.Server.DefaultResponse = masterCfg.Server.DefaultResponse
-	cfg.Server.GeoIPAPIKey = masterCfg.Server.GeoIPAPIKey
 	// Sync API tokens and CORS; keep local Listen address and enabled flag.
 	cfg.Server.API.Tokens = masterCfg.Server.API.Tokens
 	cfg.Server.API.CORS = masterCfg.Server.API.CORS
 	cfg.Zones = res.DumpZones()
 
-	// Save to local config file.
-	if err := cfg.Save(configPath); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	if err := store.SaveDefaults(dnsdata.Defaults{TTL: cfg.Server.DefaultTTL, Record: cfg.Server.DefaultRecord, Response: cfg.Server.DefaultResponse}); err != nil {
+		return err
 	}
-
-	log.Printf("[cluster] slave: config synced and saved to %s", configPath)
+	if err := store.ReplaceZones(cfg.Zones); err != nil {
+		return err
+	}
+	log.Printf("[cluster] slave: DNS data synced")
 	return nil
 }

@@ -2,9 +2,9 @@
 
 [README](../README.md) · [API reference](API_EN.md) · [中文](CONFIG.md)
 
-The Go entry point is in `src/`. From the repository root, build with `mkdir -p local && go build -o local/calidns ./src`. A directly run binary uses `config.yaml` in the current working directory; a system-installed binary uses `/etc/calidns/config.yaml`. Use `./local/calidns -config /path/to/config.yaml` to select another file. If missing, the server creates it from the [template embedded in the binary](../src/config/default_config.yaml), filling in active non-loopback IP addresses and defaulting to SQLite. An existing file is never overwritten.
+Package installs keep static configuration at `/etc/calidns/config.yaml` and mutable state under `/var/lib/calidns/`. A directly run development binary uses the current directory for both. Use `-config` and `-data-dir` to override the locations.
 
-The default `config.yaml` and database files in the repository root are ignored by Git. `local/` remains available for local binaries and data. Manual YAML changes require a restart. Zone changes made through the [HTTP API](API_EN.md) take effect immediately and are saved to the configuration file.
+The static `config.yaml` is never rewritten by the Web API. Zones and the three API-managed defaults are stored in the data directory's `dns_data.db`. Legacy zones and defaults in YAML are not imported.
 
 ## Complete example
 
@@ -15,10 +15,6 @@ server:
   listen:
     - "192.0.2.42:53"
     - "[2001:db8::42]:53"
-  default_ttl: 300
-  default_record: false
-  default_response: "refuse"     # refuse | nxdomain | servfail
-  geo_ip_api_key: "none"          # Optional ip2location.io fallback API key
   enable_geoip_mmap: false        # false: Go heap index; true: file-backed mmap index
   geoip_update_url: ""            # Direct geoip.dat URL; empty disables auto-updates
   geoip_update_interval: "24h"    # Next update is based on geoip.dat's mtime
@@ -43,50 +39,32 @@ server:
 
 database:
   type: "postgres"               # sqlite uses a local file; other values use PostgreSQL
-  sqlite_path: "queries.db"        # Used only when type=sqlite
+  sqlite_path: "queries.db"        # Relative to data-dir
   host: "127.0.0.1:5432"
   user: "dns"
   password: "replace-this-password"
   db_name: "dns_db"
 
-zones:
-  example.com:
-    mode: simple
-    default:
-      a: ["192.0.2.10"]
-      aaaa: ["2001:db8::10"]
-      mx: ["10 mail.example.com."]
-      ns: ["ns1.example.com.", "ns2.example.com."]
-      txt: ["v=spf1 mx -all"]
-      caa: ['0 issue "letsencrypt.org"']
-      other:
-        - "SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"
-    JP:
-      a: ["192.0.2.20"]
-      mx: ["10 mail-jp.example.com."]
-    ttl: 300
-    record: false
-    fast_open: false
+external_api:
+  geo_ip_api_key: "none"
 ```
 
 `192.0.2.0/24` and `2001:db8::/32` are documentation ranges; replace them with real addresses. Add country branches only when Geo routing is needed. When a branch such as `JP` matches, missing record types are **not** inherited from `default`.
 
-## `server`: listeners, default responses, and GeoIP
+## `server`: listeners and GeoIP
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `listen` | Local active non-loopback addresses on port 53 | List of IPv4 or IPv6 UDP/TCP addresses. Each entry gets both sockets. The generated list is a snapshot; edit it after network address changes. |
-| `default_ttl` | `300` | TTL in seconds when a zone has no `ttl`; non-positive values use the default. |
-| `default_record` | `false` | Record DNS queries unless a zone overrides `record`. |
-| `default_response` | `refuse` | Response for unmatched zones: `refuse`, `nxdomain`, or `servfail`. |
-| `geo_ip_api_key` | `none` | ip2location.io fallback key. `none` disables only the API fallback, not local Geo lookup. |
 | `enable_geoip_mmap` | `false` | `false`: compact Go heap index; `true`: file-mapped compact index. Requires restart. |
 | `geoip_update_url` | empty | Direct HTTP(S) URL for the GeoIP data file; empty disables automatic updates. |
 | `geoip_update_interval` | `24h` when a URL is set | Positive Go duration such as `12h` or `48h`. |
 
 Older configurations with a scalar `listen` value must change it to a list. Put any former `listen_ipv6` address in the same list. The generated list is only created for a missing config file; it does not update automatically when interfaces change.
 
-Geo lookup order is: existing IPv4 `/24` in-memory cache → `geo_cache.db` SQLite cache → local `geoip.dat` → API fallback. Put `geoip.dat` beside the selected configuration file. If it is absent, lookup can still use the cache or API. The file supplies country codes only, not city or ASN. IPv6 does not use the `/24` cache; it checks the local index or API directly.
+Geo lookup order is: existing IPv4 `/24` in-memory cache → `geo_cache.db` SQLite cache → local `geoip.dat` → API fallback. `geoip.dat` is read from the data directory (`/var/lib/calidns` for packages).
+
+Commercial integrations live under `external_api`. The core `geo.Provider` accepts an IP and returns nullable `CountryCode`, `SubLocation`, `ASN`, and `ASNName` values. The bundled ip2location provider reads `external_api.geo_ip_api_key`; an empty or `none` key disables it.
 
 With `enable_geoip_mmap: true`, startup creates a temporary compact index beside `geoip.dat`, maps it, and unlinks the temporary file. That directory must be writable. Without mmap, the process retains only the compact lookup index in Go memory, not the original `geoip.dat` contents.
 
@@ -112,13 +90,15 @@ See the [API reference](API_EN.md) for paths and examples. `GET /api/server` dis
 
 ## `database` and `cluster`
 
-`database` stores DNS query and EDNS history. The server initializes it at startup even if query recording is currently off. `type: sqlite` is suitable for a standalone node; `sqlite_path` specifies the local file and defaults to `queries.db` relative to the selected config file. PostgreSQL fields are ignored in SQLite mode. SQLite uses WAL mode. For a consistent backup, use SQLite's online backup facility or stop the server and handle the database and WAL files together.
+`database` stores DNS query and EDNS history. In SQLite mode, a relative `sqlite_path` is resolved under the data directory, producing `/var/lib/calidns/queries.db` for package installs by default.
 
-Any other `type` value, or no `type`, uses PostgreSQL. `host` can be `host:port`; omitting the port uses `5432`. Switching backends does not migrate existing history. `geo_cache.db` is a separate SQLite Geo cache beside the config file and is not controlled by `database`.
+Any other `type` value, or no `type`, uses PostgreSQL. `geo_cache.db` is a separate SQLite Geo cache in the data directory.
 
 Omit `cluster` for standalone operation. With `mode: master`, a node forwards API Zone and some server-setting changes to `slaves`. With `mode: slave` and `master` set, a node fetches zones and business settings from its master's `/api/config` at startup. Listener addresses, database settings, cluster addresses, and GeoIP mmap/update settings remain node-local; do not assume they are hot-synced. Nodes need reachable APIs and appropriate tokens.
 
-## `zones`: patterns, countries, and records
+## `dns_data.db`: defaults and zones
+
+First startup creates one `dns_defaults` row with TTL 300, recording disabled, and `refuse`, plus the `dns_zones` table. Both are managed through the Web API.
 
 Each zone can select how its key is matched. `mode: simple` treats the key as an exact DNS name, case-insensitively and with an optional trailing dot. `mode: golang` treats the key as a Go regular expression, for example `'^www\.example\.com\.?$'`. When `mode` is omitted, the legacy behavior remains: plain names are exact and keys containing regex metacharacters are treated as regular expressions. Avoid overlapping patterns because zone iteration uses a map and match precedence is not guaranteed.
 
@@ -127,11 +107,11 @@ Each zone can select how its key is matched. `mode: simple` treats the key as an
 | `mode` | `simple` for an exact domain or `golang` for a Go regular expression; omitted preserves legacy auto-detection. |
 | `default` | Fallback record set when no country branch matches; normally provide one. |
 | `JP`, `US`, etc. | Complete record set for that country; **does not merge missing record types from `default`**. |
-| `ttl` | Zone TTL in seconds; omitted uses `server.default_ttl`. |
-| `record` | Overrides `server.default_record`. |
+| `ttl` | Zone TTL in seconds; omitted uses the database `default_ttl`. |
+| `record` | Overrides the database `default_record`. |
 | `fast_open` | Always selects `default` instead of Geo routing; Geo lookup may still be used for logging. |
 
-Unmatched zones use `server.default_response`. A matched zone without the requested type in its selected branch returns NOERROR/NODATA with a generated SOA. Failed or missing Geo lookup selects `default`.
+Unmatched zones use the database `default_response`. A matched zone without the requested type in its selected branch returns NOERROR/NODATA with a generated SOA. Failed or missing Geo lookup selects `default`.
 
 Each record field is an array of strings:
 
@@ -151,4 +131,4 @@ Each record field is an array of strings:
 
 Use fully qualified domain targets ending in `.`. Do not include the owner name, TTL, or `IN` in `other`; the server supplies those. The API validates new records. Invalid manually edited YAML records are skipped when queried and logged. Currently `cname` answers only CNAME queries; it does not automatically turn A/AAAA requests into alias responses. `ns` returns NS records but does not generate glue records.
 
-The API and YAML use the same record-field names. See the [Zone API](API_EN.md#zones) for dynamic changes.
+See the [Zone API](API_EN.md#zones) for record management.

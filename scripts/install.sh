@@ -4,6 +4,7 @@ set -euo pipefail
 repo=${CALIDNS_REPOSITORY:-jadrens/calidns}
 requested_version=${CALIDNS_VERSION:-latest}
 config_dir=/etc/calidns
+data_dir=/var/lib/calidns
 curl_args=(--fail --location --retry 1 --retry-delay 1 --connect-timeout 5 --max-time 15)
 
 log() {
@@ -148,8 +149,10 @@ if [[ $service_user == calidns ]]; then
 fi
 
 install -d -m 0750 "$config_dir"
+install -d -m 0750 "$data_dir"
 if [[ $service_user == calidns ]]; then
-  chown -R "$service_user:$service_group" "$config_dir"
+	chown -R "$service_user:$service_group" "$config_dir"
+	chown -R "$service_user:$service_group" "$data_dir"
 fi
 
 installed_service=
@@ -165,8 +168,8 @@ After=network-online.target
 Type=simple
 User=$service_user
 Group=$service_group
-WorkingDirectory=$config_dir
-ExecStart=$binary_path -config $config_dir/config.yaml
+WorkingDirectory=$data_dir
+ExecStart=$binary_path -config $config_dir/config.yaml -data-dir $data_dir
 Restart=on-failure
 RestartSec=5s
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -175,7 +178,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=$config_dir
+ReadWritePaths=$config_dir $data_dir
 
 [Install]
 WantedBy=multi-user.target
@@ -195,9 +198,9 @@ elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>
 name="CaliDNS"
 description="CaliDNS authoritative DNS server"
 command="$binary_path"
-command_args="-config $config_dir/config.yaml"
+command_args="-config $config_dir/config.yaml -data-dir $data_dir"
 command_user="$openrc_user:$openrc_group"
-directory="$config_dir"
+directory="$data_dir"
 command_background=true
 pidfile="/run/calidns.pid"
 
@@ -211,6 +214,7 @@ fi
 
 log "installed CaliDNS $tag at $binary_path"
 log "configuration: $config_dir/config.yaml"
+log "data: $data_dir"
 case $installed_service in
   systemd)
     log 'the systemd service was installed; its enabled and running state was not changed'
@@ -223,6 +227,6 @@ case $installed_service in
     log 'enable it at boot: rc-update add calidns default'
     ;;
   *)
-    log "no supported init system is active; start it with: $binary_path -config $config_dir/config.yaml"
+    log "no supported init system is active; start it with: $binary_path -config $config_dir/config.yaml -data-dir $data_dir"
     ;;
 esac

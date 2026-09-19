@@ -120,7 +120,7 @@ func TestEnableGeoIPMmap(t *testing.T) {
 	}
 }
 
-func TestLoadZoneModes(t *testing.T) {
+func TestLoadDoesNotImportLegacyZones(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := `
 server:
@@ -142,16 +142,8 @@ zones:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Zones["example.com"].Mode != "simple" || cfg.Zones[`^api\.example\.com\.?$`].Mode != "golang" {
-		t.Fatalf("zone modes were not loaded: %+v", cfg.Zones)
-	}
-
-	invalid := strings.Replace(contents, "mode: simple", "mode: wildcard", 1)
-	if err := os.WriteFile(path, []byte(invalid), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must be simple or golang") {
-		t.Fatalf("invalid mode error = %v", err)
+	if len(cfg.Zones) != 0 {
+		t.Fatalf("legacy YAML zones were imported: %+v", cfg.Zones)
 	}
 }
 

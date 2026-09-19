@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"dns-server/src/config"
+	"dns-server/src/dnsdata"
 	"dns-server/src/geo"
 	"dns-server/src/recorder"
 	"dns-server/src/resolver"
@@ -18,13 +19,13 @@ import (
 
 // Server handles HTTP API requests.
 type Server struct {
-	resolver   *resolver.Resolver
-	recorder   *recorder.Recorder
-	geoLookup  *geo.Lookuper
-	mux        *http.ServeMux
-	tokens     map[string]struct{} // set of valid bearer tokens
-	cfg        *config.Config      // server config (for persisting zone changes)
-	configPath string              // path to config file
+	resolver  *resolver.Resolver
+	recorder  *recorder.Recorder
+	geoLookup *geo.Lookuper
+	mux       *http.ServeMux
+	tokens    map[string]struct{} // set of valid bearer tokens
+	cfg       *config.Config      // server config (for persisting zone changes)
+	dnsStore  *dnsdata.Store      // Web-API-managed DNS data
 
 	// Cluster sync.
 	clusterMode string   // "master", "slave", or empty
@@ -42,7 +43,7 @@ type Server struct {
 }
 
 // NewServer creates a new API server.
-func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lookuper, tokens []string, corsCfg config.CORSConfig, cfg *config.Config, configPath string) *Server {
+func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lookuper, tokens []string, corsCfg config.CORSConfig, cfg *config.Config, dnsStore *dnsdata.Store) *Server {
 	tokenSet := make(map[string]struct{}, len(tokens))
 	for _, t := range tokens {
 		if t = strings.TrimSpace(t); t != "" {
@@ -59,7 +60,7 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 		mux:             http.NewServeMux(),
 		tokens:          tokenSet,
 		cfg:             cfg,
-		configPath:      configPath,
+		dnsStore:        dnsStore,
 		clusterMode:     cfg.Cluster.Mode,
 		slaves:          cfg.Cluster.Slaves,
 		masterURL:       cfg.Cluster.Master,
@@ -244,7 +245,7 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[API] zone upserted: %s", req.Pattern)
-	s.syncConfig()
+	s.persistDNSData()
 	s.forwardToSlaves(r.Method, r.URL.RequestURI(), bodyBytes)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "pattern": req.Pattern})
 }
@@ -252,7 +253,7 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteZone(w http.ResponseWriter, r *http.Request, pattern string) {
 	if s.resolver.RemoveZone(pattern) {
 		log.Printf("[API] zone deleted: %s", pattern)
-		s.syncConfig()
+		s.persistDNSData()
 		s.forwardToSlaves(r.Method, r.URL.RequestURI(), nil)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "pattern": pattern})
 	} else {
@@ -263,7 +264,7 @@ func (s *Server) deleteZone(w http.ResponseWriter, r *http.Request, pattern stri
 func (s *Server) deleteCountry(w http.ResponseWriter, r *http.Request, pattern, country string) {
 	if s.resolver.RemoveCountry(pattern, country) {
 		log.Printf("[API] country %q removed from zone %s", country, pattern)
-		s.syncConfig()
+		s.persistDNSData()
 		s.forwardToSlaves(r.Method, r.URL.RequestURI(), nil)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "pattern": pattern, "country": country})
 	} else {
@@ -520,7 +521,6 @@ func (s *Server) getServerConfig(w http.ResponseWriter, r *http.Request) {
 		"default_ttl":           s.cfg.Server.DefaultTTL,
 		"default_response":      s.cfg.Server.DefaultResponse,
 		"default_record":        s.cfg.Server.DefaultRecord,
-		"geo_ip_api_key":        s.cfg.Server.GeoIPAPIKey,
 		"enable_geoip_mmap":     s.cfg.Server.EnableGeoIPMmap,
 		"geoip_update_url":      s.cfg.Server.GeoIPUpdateURL,
 		"geoip_update_interval": s.cfg.Server.GeoIPUpdateInterval,
@@ -540,7 +540,6 @@ func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {
 		DefaultTTL      *int    `json:"default_ttl,omitempty"`
 		DefaultResponse *string `json:"default_response,omitempty"`
 		DefaultRecord   *bool   `json:"default_record,omitempty"`
-		GeoIPAPIKey     *string `json:"geo_ip_api_key,omitempty"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -574,11 +573,6 @@ func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
-	if req.GeoIPAPIKey != nil {
-		s.cfg.Server.GeoIPAPIKey = *req.GeoIPAPIKey
-		changed = true
-	}
-
 	if !changed {
 		writeError(w, http.StatusBadRequest, "no valid fields to update")
 		return
@@ -587,12 +581,11 @@ func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Hot-reload resolver defaults (TTL and record are cached there).
 	s.resolver.UpdateDefaults(uint32(s.cfg.Server.DefaultTTL), s.cfg.Server.DefaultRecord)
 
-	s.syncConfig()
+	s.persistDNSData()
 	s.forwardToSlaves(r.Method, r.URL.RequestURI(), bodyBytes)
 
-	log.Printf("[API] server config updated: ttl=%d response=%s record=%v geo_ip_api_key=%s",
-		s.cfg.Server.DefaultTTL, s.cfg.Server.DefaultResponse, s.cfg.Server.DefaultRecord,
-		maskKey(s.cfg.Server.GeoIPAPIKey))
+	log.Printf("[API] server config updated: ttl=%d response=%s record=%v",
+		s.cfg.Server.DefaultTTL, s.cfg.Server.DefaultResponse, s.cfg.Server.DefaultRecord)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -665,12 +658,21 @@ func (s *Server) setCORSHeaders(w http.ResponseWriter) {
 	}
 }
 
-// --- Config persistence ---
+// --- DNS data persistence ---
 
-func (s *Server) syncConfig() {
+func (s *Server) persistDNSData() {
 	s.cfg.Zones = s.resolver.DumpZones()
-	if err := s.cfg.Save(s.configPath); err != nil {
-		log.Printf("[API] failed to save config: %v", err)
+	if s.dnsStore == nil {
+		return
+	}
+	if err := s.dnsStore.SaveDefaults(dnsdata.Defaults{
+		TTL: s.cfg.Server.DefaultTTL, Record: s.cfg.Server.DefaultRecord,
+		Response: s.cfg.Server.DefaultResponse,
+	}); err != nil {
+		log.Printf("[API] failed to save DNS defaults: %v", err)
+	}
+	if err := s.dnsStore.ReplaceZones(s.cfg.Zones); err != nil {
+		log.Printf("[API] failed to save DNS zones: %v", err)
 	}
 }
 
@@ -684,16 +686,4 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// maskKey returns a masked version of an API key for logging purposes.
-// Shows first 4 chars + "...", or "none" if empty/"none".
-func maskKey(key string) string {
-	if key == "" || key == "none" {
-		return "none"
-	}
-	if len(key) <= 4 {
-		return "***"
-	}
-	return key[:4] + "..."
 }

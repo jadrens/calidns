@@ -2,7 +2,7 @@
 
 [README](../README.md) · [English](CONFIG_EN.md) · [API 文档](API.md)
 
-源码入口位于 `src/`，可在项目根目录执行 `mkdir -p local && go build -o local/calidns ./src` 构建。直接运行的二进制程序默认读取当前工作目录的 `config.yaml`；系统安装的程序使用 `/etc/calidns/config.yaml`。也可以用 `./local/calidns -config /path/to/config.yaml` 指定路径。文件不存在时，程序会从编入二进制的 [默认模板](../src/config/default_config.yaml) 生成配置，并填入活动的非回环 IP 地址（默认使用本地 SQLite）；已有文件不会被覆盖。手动修改 YAML 后需重启服务；通过 [HTTP API](API.md) 更新的 Zone 会即时生效，并写回配置文件。
+源码入口位于 `src/`。软件包安装时，静态配置位于 `/etc/calidns/config.yaml`，数据库及 GeoIP 数据位于 `/var/lib/calidns/`。源码直接运行时，两者默认使用当前目录；可用 `-config` 和 `-data-dir` 分别指定。Web API 修改的 Zone、`default_ttl`、`default_record`、`default_response` 都写入 `dns_data.db`，不会重写 YAML。不转换旧版 YAML 中的 Zone 和默认项。
 
 ## 完整示例
 
@@ -13,10 +13,6 @@ server:
   listen:
     - "192.0.2.42:53"
     - "[2001:db8::42]:53"
-  default_ttl: 300
-  default_record: false
-  default_response: "refuse"     # refuse | nxdomain | servfail
-  geo_ip_api_key: "none"          # 可选的 ip2location.io API 兜底 Key
   enable_geoip_mmap: false        # false: Go 内存索引；true: 文件映射索引
   geoip_update_url: ""            # 直链 geoip.dat；空值关闭自动更新
   geoip_update_interval: "24h"    # 以 geoip.dat 的 mtime 计算下次更新时间
@@ -41,56 +37,38 @@ server:
 
 database:
   type: "postgres"               # sqlite 使用本地文件；其他值使用 PostgreSQL
-  sqlite_path: "queries.db"        # 仅 type=sqlite 时生效
+  sqlite_path: "queries.db"        # 相对于 data-dir
   host: "127.0.0.1:5432"
   user: "dns"
   password: "replace-this-password"
   db_name: "dns_db"
 
-zones:
-  example.com:
-    mode: simple
-    default:
-      a: ["192.0.2.10"]
-      aaaa: ["2001:db8::10"]
-      mx: ["10 mail.example.com."]
-      ns: ["ns1.example.com.", "ns2.example.com."]
-      txt: ["v=spf1 mx -all"]
-      caa: ['0 issue "letsencrypt.org"']
-      other:
-        - "SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"
-    JP:
-      a: ["192.0.2.20"]
-      mx: ["10 mail-jp.example.com."]
-    ttl: 300
-    record: false
-    fast_open: false
+external_api:
+  geo_ip_api_key: "none"
 ```
 
 示例里的 `192.0.2.0/24`、`2001:db8::/32` 是文档地址，部署时要换成实际地址。只有在需要 Geo 分流时才配置国家分支；`JP` 这样的分支一旦命中，不会从 `default` 继承缺少的记录类型。
 
-## `server`：监听、默认应答与 GeoIP
+## `server`：监听与 GeoIP
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `listen` | 活动的非回环 IP 地址，端口 53 | IPv4/IPv6 UDP/TCP 地址列表；每个地址分别监听 UDP 和 TCP。生成时保存当前地址，网络地址变化后需手动更新。 |
-| `default_ttl` | `300` | Zone 未指定 `ttl` 时的秒数；非正数会使用默认值。 |
-| `default_record` | `false` | Zone 未覆盖 `record` 时是否记录 DNS 查询。 |
-| `default_response` | `refuse` | 未匹配任何 Zone 时返回 `refuse`、`nxdomain` 或 `servfail`。 |
-| `geo_ip_api_key` | `none` | 本地 Geo 数据未命中时使用的 ip2location.io API Key；`none` 只关闭 API 兜底，不关闭本地 Geo。 |
 | `enable_geoip_mmap` | `false` | `false` 使用 Go 堆内紧凑索引；`true` 使用文件映射的紧凑索引。重启后生效。 |
 | `geoip_update_url` | 空 | GeoIP 数据文件的 HTTP(S) 直接下载地址；空值关闭自动更新。 |
 | `geoip_update_interval` | `24h`（配置了 URL 时） | 更新间隔，使用 Go duration 写法，如 `12h`、`48h`；必须大于 0。 |
 
 旧配置中的单个 `listen` 字符串需要改为列表；原 `listen_ipv6` 地址也应放入同一列表。仅在配置文件首次生成时检测本机地址，之后网络地址变化需手动更新。
 
-Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLite 缓存 → 本地 `geoip.dat` → API 兜底。`geoip.dat` 应与所使用的配置文件放在同一目录；文件不存在时继续使用缓存/API。它只提供国家代码，不能提供城市或 ASN。IPv6 不使用现有的 `/24` 缓存，会直接查询本地索引或 API。
+Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLite 缓存 → 本地 `geoip.dat` → API 兜底。`geoip.dat` 位于数据目录（软件包默认为 `/var/lib/calidns`）；文件不存在时继续使用缓存/API。
+
+商业 API 代码位于 `external_api`，核心 `geo.Provider` 接口只接收 IP，并返回可空的 `CountryCode`、`SubLocation`、`ASN`、`ASNName`。内置 ip2location 实现默认由 `external_api.geo_ip_api_key` 配置；`none` 或空值关闭外部兜底。
 
 `enable_geoip_mmap: true` 时，启动过程会在 `geoip.dat` 所在目录创建临时紧凑索引文件，映射成功后删除其目录项；因此该目录必须可写。关闭 mmap 时，运行期间只保留计算用的紧凑索引，不会把原始 `geoip.dat` 常驻内存。
 
 配置 `geoip_update_url` 后，下次更新时间 = **`geoip.dat` 的 mtime + `geoip_update_interval`**。启动时若文件不存在或已经到期，会立即尝试下载；未到期则等待剩余时间。下载内容必须是原始 `geoip.dat` 文件，不能是 ZIP、网页或 API JSON。服务先校验新文件并构建索引，成功后才替换磁盘文件和运行中的索引，无需重启；失败会保留旧文件/索引，并在 1 分钟至 1 小时后重试。成功更新会把文件 mtime 设为更新时间。由于 SQLite `/24` 缓存仍然优先，已有缓存条目在过期或删除前不会立即改用新数据。手工替换 `geoip.dat` 后仍需重启才能加载。
 
-建议使用可信的 HTTPS 地址。自动更新需要配置文件所在目录可写；更新期间会短暂同时保留旧索引与新索引，内存占用可能高于平时。
+建议使用可信的 HTTPS 地址。自动更新需要数据目录可写；更新期间会短暂同时保留旧索引与新索引，内存占用可能高于平时。
 
 ## `server.api`：HTTP 管理接口
 
@@ -110,13 +88,15 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 
 ## `database` 与 `cluster`
 
-`database` 存储 DNS 查询日志和 EDNS 记录；程序启动时会初始化它，即使当前没有开启查询记录也需要可用。`type: sqlite` 适用于单机部署，使用 `sqlite_path` 指定本地数据库文件；相对路径以配置文件所在目录为基准，省略时默认为 `queries.db`。此时 `host`、`user`、`password`、`db_name` 不生效。SQLite 使用 WAL 日志模式；备份时请使用 SQLite 的在线备份方式，或停机后同时处理数据库及其 WAL 文件。
+`database` 存储 DNS 查询日志和 EDNS 记录。`type: sqlite` 时，`sqlite_path` 的相对路径以数据目录为基准，软件包默认得到 `/var/lib/calidns/queries.db`。
 
-`type` 为其他值或省略时沿用 PostgreSQL；`host` 可写作 `主机:端口`，省略端口时使用 `5432`。从 PostgreSQL 切换到 SQLite 不会自动迁移旧日志。`geo_cache.db` 是独立的 SQLite Geo 缓存文件，位于配置文件所在目录，不受 `database` 字段控制。
+`type` 为其他值或省略时沿用 PostgreSQL。`geo_cache.db` 是独立的 SQLite Geo 缓存文件，也位于数据目录。
 
 `cluster` 可省略。`mode: master` 时，主节点会把通过 API 进行的 Zone/部分服务器配置变更转发给 `slaves`；`mode: slave` 且设置 `master` 时，从节点启动时会从主节点的 `/api/config` 拉取 Zone 和业务配置。`listen`、数据库、集群地址及 GeoIP mmap/自动更新设置属于节点本地配置，不应假设会随主节点热同步。主从通信依赖各节点的 API 可访问以及相应 Token。
 
-## `zones`：匹配、国家分支和记录
+## `dns_data.db`：默认项与 Zone
+
+首次启动会创建单行 `dns_defaults` 表，写入 TTL `300`、记录关闭、默认响应 `refuse`；Zone 保存在 `dns_zones` 表。两者均通过 Web API 管理，`config.yaml` 中的旧 Zone 和默认项不会导入。
 
 每个 Zone 可以选择键的匹配方式。`mode: simple` 将键作为 DNS 域名进行不区分大小写的精确匹配，并允许末尾的点；`mode: golang` 将键直接作为 Go 正则表达式，例如 `'^www\.example\.com\.?$'`。省略 `mode` 时保留旧版自动判断行为：普通域名精确匹配，包含正则元字符的键按正则处理。请避免让多个 Zone 模式匹配同一域名：当前配置用 map 读取，重叠模式的优先顺序不保证固定。
 
@@ -127,11 +107,11 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 | `mode` | `simple` 表示精确域名，`golang` 表示 Go 正则；省略时保留旧版自动判断。 |
 | `default` | 国家代码未命中时使用的记录集，建议始终配置。 |
 | `JP`、`US` 等 | 对应国家代码的完整记录集；**不会按记录类型与 `default` 合并**。 |
-| `ttl` | 该 Zone 的 TTL 秒数；省略时继承 `server.default_ttl`。 |
-| `record` | 覆盖 `server.default_record`。 |
+| `ttl` | 该 Zone 的 TTL 秒数；省略时继承数据库中的 `default_ttl`。 |
+| `record` | 覆盖数据库中的 `default_record`。 |
 | `fast_open` | 为 `true` 时始终选用 `default` 分支，不按 Geo 选择记录；如开启记录日志，Geo 仍可能用于日志。 |
 
-未匹配 Zone 时使用 `server.default_response`。匹配了 Zone、但该国家分支没有所查询的记录类型时，返回 NOERROR/NODATA，并附带程序生成的 SOA。Geo 查询失败或未命中时使用 `default` 分支。
+未匹配 Zone 时使用数据库中的 `default_response`。匹配了 Zone、但该国家分支没有所查询的记录类型时，返回 NOERROR/NODATA，并附带程序生成的 SOA。Geo 查询失败或未命中时使用 `default` 分支。
 
 每个国家分支中的记录字段均为字符串数组：
 
@@ -149,6 +129,6 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 | `soa` | `"ns1.example.com. hostmaster.example.com. 2026091601 3600 900 1209600 300"` | MNAME、RNAME、Serial、Refresh、Retry、Expire、Minimum。 |
 | `other` | `"SSHFP 1 1 0123456789abcdef0123456789abcdef01234567"` | 其他支持的 RR，写作 `类型 RDATA`，也可用于 TLSA 等。 |
 
-域名目标建议使用以 `.` 结尾的完整域名。`other` 中不要写记录名、TTL 或 `IN`，这些由服务按查询域名和 Zone TTL 生成。API 新增 Zone 时会校验新类型的记录格式；手工编辑 YAML 后，格式错误的记录会在对应 DNS 查询时被跳过并写入日志。当前 `cname` 仅在查询 CNAME 类型时返回；不会自动作为 A/AAAA 查询的别名应答。`ns` 提供 NS 记录应答，但不自动生成委派的 glue 记录。
+域名目标建议使用以 `.` 结尾的完整域名。`other` 中不要写记录名、TTL 或 `IN`，这些由服务按查询域名和 Zone TTL 生成。API 新增 Zone 时会校验记录格式。当前 `cname` 仅在查询 CNAME 类型时返回；不会自动作为 A/AAAA 查询的别名应答。`ns` 提供 NS 记录应答，但不自动生成委派的 glue 记录。
 
-API 与 YAML 的字段名一致；例如 `mx` 在 API 中也是字符串数组。需要动态更新时参见 [Zone API](API.md#6-新增--更新-zone)。
+需要管理记录时参见 [Zone API](API.md#6-新增--更新-zone)。
