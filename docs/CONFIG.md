@@ -2,7 +2,7 @@
 
 [README](../README.md) · [English](CONFIG_EN.md) · [API 文档](API.md)
 
-源码入口位于 `src/`，可在项目根目录执行 `mkdir -p local && go build -o local/dns-server ./src` 构建。服务默认读取工作目录下的 `local/config.yaml`；也可以用 `./local/dns-server -config /path/to/config.yaml` 指定路径。指定的文件不存在时，程序会从编入二进制的 [默认模板](../src/config/default_config.yaml) 生成配置（默认使用本地 SQLite）；已有文件不会被覆盖。`local/` 已被 Git 忽略，用于存放本机配置、GeoIP 数据、数据库和构建产物。手动修改 YAML 后需重启服务；通过 [HTTP API](API.md) 更新的 Zone 会即时生效，并写回配置文件。
+源码入口位于 `src/`，可在项目根目录执行 `mkdir -p local && go build -o local/dns-server ./src` 构建。直接运行的二进制程序默认读取当前工作目录的 `config.yaml`；系统安装的程序使用 `/etc/calidns/config.yaml`。也可以用 `./local/dns-server -config /path/to/config.yaml` 指定路径。文件不存在时，程序会从编入二进制的 [默认模板](../src/config/default_config.yaml) 生成配置，并填入活动的非回环 IP 地址（默认使用本地 SQLite）；已有文件不会被覆盖。手动修改 YAML 后需重启服务；通过 [HTTP API](API.md) 更新的 Zone 会即时生效，并写回配置文件。
 
 ## 完整示例
 
@@ -10,8 +10,9 @@
 
 ```yaml
 server:
-  listen: ":53"
-  listen_ipv6: ""                 # 例如 "[::]:53"；留空则不监听 IPv6
+  listen:
+    - "192.0.2.42:53"
+    - "[2001:db8::42]:53"
   default_ttl: 300
   default_record: false
   default_response: "refuse"     # refuse | nxdomain | servfail
@@ -48,6 +49,7 @@ database:
 
 zones:
   example.com:
+    mode: simple
     default:
       a: ["192.0.2.10"]
       aaaa: ["2001:db8::10"]
@@ -71,8 +73,7 @@ zones:
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `listen` | `:53` | IPv4 UDP/TCP 监听地址。`:53` 表示监听所有 IPv4 地址。 |
-| `listen_ipv6` | 空 | IPv6 UDP/TCP 监听地址；例如 `[::]:53`。 |
+| `listen` | 活动的非回环 IP 地址，端口 53 | IPv4/IPv6 UDP/TCP 地址列表；每个地址分别监听 UDP 和 TCP。生成时保存当前地址，网络地址变化后需手动更新。 |
 | `default_ttl` | `300` | Zone 未指定 `ttl` 时的秒数；非正数会使用默认值。 |
 | `default_record` | `false` | Zone 未覆盖 `record` 时是否记录 DNS 查询。 |
 | `default_response` | `refuse` | 未匹配任何 Zone 时返回 `refuse`、`nxdomain` 或 `servfail`。 |
@@ -80,6 +81,8 @@ zones:
 | `enable_geoip_mmap` | `false` | `false` 使用 Go 堆内紧凑索引；`true` 使用文件映射的紧凑索引。重启后生效。 |
 | `geoip_update_url` | 空 | GeoIP 数据文件的 HTTP(S) 直接下载地址；空值关闭自动更新。 |
 | `geoip_update_interval` | `24h`（配置了 URL 时） | 更新间隔，使用 Go duration 写法，如 `12h`、`48h`；必须大于 0。 |
+
+旧配置中的单个 `listen` 字符串需要改为列表；原 `listen_ipv6` 地址也应放入同一列表。仅在配置文件首次生成时检测本机地址，之后网络地址变化需手动更新。
 
 Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLite 缓存 → 本地 `geoip.dat` → API 兜底。`geoip.dat` 应与所使用的配置文件放在同一目录；文件不存在时继续使用缓存/API。它只提供国家代码，不能提供城市或 ASN。IPv6 不使用现有的 `/24` 缓存，会直接查询本地索引或 API。
 
@@ -111,16 +114,17 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 
 `type` 为其他值或省略时沿用 PostgreSQL；`host` 可写作 `主机:端口`，省略端口时使用 `5432`。从 PostgreSQL 切换到 SQLite 不会自动迁移旧日志。`geo_cache.db` 是独立的 SQLite Geo 缓存文件，位于配置文件所在目录，不受 `database` 字段控制。
 
-`cluster` 可省略。`mode: master` 时，主节点会把通过 API 进行的 Zone/部分服务器配置变更转发给 `slaves`；`mode: slave` 且设置 `master` 时，从节点启动时会从主节点的 `/api/config` 拉取 Zone 和业务配置。`listen`、`listen_ipv6`、数据库、集群地址及 GeoIP mmap/自动更新设置属于节点本地配置，不应假设会随主节点热同步。主从通信依赖各节点的 API 可访问以及相应 Token。
+`cluster` 可省略。`mode: master` 时，主节点会把通过 API 进行的 Zone/部分服务器配置变更转发给 `slaves`；`mode: slave` 且设置 `master` 时，从节点启动时会从主节点的 `/api/config` 拉取 Zone 和业务配置。`listen`、数据库、集群地址及 GeoIP mmap/自动更新设置属于节点本地配置，不应假设会随主节点热同步。主从通信依赖各节点的 API 可访问以及相应 Token。
 
 ## `zones`：匹配、国家分支和记录
 
-`zones` 的键是域名或 Go 正则表达式。普通域名（如 `example.com`）会自动转为精确匹配；包含正则元字符的键会按原样当作正则表达式使用，例如 `'^www\.example\.com\.?$'`。查询域名会转为小写，建议 Zone 键也使用小写。请避免让多个 Zone 模式匹配同一域名：当前配置用 map 读取，重叠模式的优先顺序不保证固定。
+每个 Zone 可以选择键的匹配方式。`mode: simple` 将键作为 DNS 域名进行不区分大小写的精确匹配，并允许末尾的点；`mode: golang` 将键直接作为 Go 正则表达式，例如 `'^www\.example\.com\.?$'`。省略 `mode` 时保留旧版自动判断行为：普通域名精确匹配，包含正则元字符的键按正则处理。请避免让多个 Zone 模式匹配同一域名：当前配置用 map 读取，重叠模式的优先顺序不保证固定。
 
 每个 Zone 可设置：
 
 | 字段 | 说明 |
 | --- | --- |
+| `mode` | `simple` 表示精确域名，`golang` 表示 Go 正则；省略时保留旧版自动判断。 |
 | `default` | 国家代码未命中时使用的记录集，建议始终配置。 |
 | `JP`、`US` 等 | 对应国家代码的完整记录集；**不会按记录类型与 `default` 合并**。 |
 | `ttl` | 该 Zone 的 TTL 秒数；省略时继承 `server.default_ttl`。 |

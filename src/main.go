@@ -25,26 +25,31 @@ import (
 	"dns-server/src/resolver"
 )
 
-func newDNSServers(addr4, addr6 string) []*dns.Server {
+func newDNSServers(addresses []string) []*dns.Server {
 	var servers []*dns.Server
-	if addr4 != "" {
+	for _, addr := range addresses {
 		servers = append(servers,
-			&dns.Server{Addr: addr4, Net: "udp"},
-			&dns.Server{Addr: addr4, Net: "tcp"},
-		)
-	}
-	if addr6 != "" {
-		servers = append(servers,
-			&dns.Server{Addr: addr6, Net: "udp"},
-			&dns.Server{Addr: addr6, Net: "tcp"},
+			&dns.Server{Addr: addr, Net: "udp"},
+			&dns.Server{Addr: addr, Net: "tcp"},
 		)
 	}
 	return servers
 }
 
 func main() {
-	configPath := flag.String("config", filepath.Join("local", "config.yaml"), "Path to YAML configuration file")
+	configPath := flag.String("config", "", "Path to YAML configuration file")
 	flag.Parse()
+	if *configPath == "" {
+		executable, err := os.Executable()
+		if err != nil {
+			log.Fatalf("Finding executable path: %v", err)
+		}
+		workdir, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Finding current directory: %v", err)
+		}
+		*configPath = defaultConfigPath(executable, workdir)
+	}
 
 	// Generate default config if missing.
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
@@ -97,7 +102,7 @@ func main() {
 
 	// DNS server.
 	dns.HandleFunc(".", h.ServeDNS)
-	dnsServers := newDNSServers(cfg.Server.Listen, cfg.Server.ListenIPv6)
+	dnsServers := newDNSServers(cfg.Server.Listen)
 
 	// HTTP API server.
 	var apiSrv *http.Server
@@ -147,11 +152,7 @@ func main() {
 	}
 
 	// Start DNS servers.
-	addrs := cfg.Server.Listen
-	if cfg.Server.ListenIPv6 != "" {
-		addrs += " (IPv6: " + cfg.Server.ListenIPv6 + ")"
-	}
-	log.Printf("Starting authoritative DNS server on %s (UDP/TCP)", addrs)
+	log.Printf("Starting authoritative DNS server on %s (UDP/TCP)", strings.Join(cfg.Server.Listen, ", "))
 	fmt.Printf("Default TTL: %ds | Default record: %v | Default response: %s\n",
 		cfg.Server.DefaultTTL, cfg.Server.DefaultRecord, cfg.Server.DefaultResponse)
 
@@ -159,7 +160,7 @@ func main() {
 		server := server
 		go func() {
 			if err := server.ListenAndServe(); err != nil {
-				log.Printf("DNS server error (%s): %v", server.Net, err)
+				log.Printf("DNS server error (%s %s): %v", server.Net, server.Addr, err)
 			}
 		}()
 	}
@@ -167,6 +168,15 @@ func main() {
 	// Wait for shutdown to complete.
 	<-ctx.Done()
 	log.Println("Server stopped")
+}
+
+func defaultConfigPath(executable, workdir string) string {
+	switch filepath.Dir(executable) {
+	case "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin":
+		return "/etc/calidns/config.yaml"
+	default:
+		return filepath.Join(workdir, "config.yaml")
+	}
 }
 
 // syncFromMaster fetches the full config from the master server and applies zones.
@@ -222,6 +232,7 @@ func syncFromMaster(cfg *config.Config, res *resolver.Resolver, configPath strin
 		ze := resolver.ZoneEntry{
 			Pattern:   pattern,
 			Regex:     pattern,
+			Mode:      zc.Mode,
 			Countries: countries,
 			TTL:       zc.TTL,
 			Record:    zc.Record,

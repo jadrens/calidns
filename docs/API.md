@@ -6,11 +6,11 @@ YAML 字段和完整配置示例见 [配置文档](CONFIG.md)。
 
 ## 概述
 
-- **默认端口**: `3101`（可在 `local/config.yaml` → `server.api.listen` 配置）
+- **默认端口**: `3101`（可在当前配置文件的 `server.api.listen` 中配置）
 - **Content-Type**: `application/json`
 - **CORS**: 已启用（允许所有来源）
 
-GeoIP 索引模式由 `local/config.yaml` 的 `server.enable_geoip_mmap` 控制，修改后需重启。`false` 使用常驻 Go 内存中的紧凑索引；`true` 使用文件映射的紧凑索引，并要求 `geoip.dat` 所在目录可写，以便启动时创建临时索引文件。
+GeoIP 索引模式由当前配置文件的 `server.enable_geoip_mmap` 控制，修改后需重启。`false` 使用常驻 Go 内存中的紧凑索引；`true` 使用文件映射的紧凑索引，并要求 `geoip.dat` 所在目录可写，以便启动时创建临时索引文件。
 自动更新由 `server.geoip_update_url` 和 `server.geoip_update_interval` 控制，更新时间按 `geoip.dat` 的 mtime 计算，详见 [配置文档](CONFIG.md)。
 `GET /api/server` 会显示当前配置值；`PUT /api/server` 不会热切换 GeoIP mmap 或自动更新设置。
 
@@ -18,7 +18,7 @@ GeoIP 索引模式由 `local/config.yaml` 的 `server.enable_geoip_mmap` 控制�
 
 除 `/api/health` 外，所有 API 端点均需 **Bearer Token** 鉴权。
 
-在 `local/config.yaml` 中配置 token 列表:
+在当前配置文件中配置 token 列表:
 
 ```yaml
 server:
@@ -82,7 +82,7 @@ server:
 **响应示例**:
 ```json
 {
-    "listen": ":15353",
+    "listen": ["192.0.2.42:53", "[2001:db8::42]:53"],
     "default_ttl": 300,
     "default_response": "refuse",
     "default_record": false,
@@ -134,7 +134,7 @@ server:
 {"error": "default_response must be one of: refuse, nxdomain, servfail"}
 ```
 
-> 💡 修改后会自动保存到当前使用的配置文件（默认为 `local/config.yaml`），重启后依然生效。
+> 💡 修改后会自动保存到当前使用的配置文件，重启后依然生效。
 
 ---
 
@@ -150,6 +150,7 @@ server:
         {
             "pattern": "^aaa\\.bbb\\.com\\.?$",
             "regex": "^aaa\\.bbb\\.com\\.?$",
+            "mode": "golang",
             "countries": {
                 "default": {
                     "a": ["1.1.1.1", "2.2.2.2"],
@@ -188,6 +189,7 @@ GET /api/zones?pattern=%5Eaaa%5C%5C.bbb%5C%5C.com%5C%5C.%3F%24
 {
     "pattern": "^aaa\\.bbb\\.com\\.?$",
     "regex": "^aaa\\.bbb\\.com\\.?$",
+    "mode": "golang",
     "countries": {
         "CN": {
             "a": ["6.6.6.6", "7.7.7.7"],
@@ -221,6 +223,7 @@ GET /api/zones?pattern=%5Eaaa%5C%5C.bbb%5C%5C.com%5C%5C.%3F%24
 ```json
 {
     "pattern": "^test\\.dns\\.com\\.?$",
+    "mode": "golang",
     "countries": {
         "default": {
             "a": ["99.99.99.99"],
@@ -247,6 +250,7 @@ GET /api/zones?pattern=%5Eaaa%5C%5C.bbb%5C%5C.com%5C%5C.%3F%24
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `pattern` | string | 是 | Go 正则表达式，用于匹配域名 |
+| `mode` | string | 否 | `simple` 为精确域名匹配，`golang` 为 Go 正则；省略时沿用旧版自动判断 |
 | `countries` | object | 否 | 国家代号 → 记录集的映射，`"default"` 为兜底 |
 | `countries.<code>.a` | []string | 否 | A 记录（IPv4） |
 | `countries.<code>.aaaa` | []string | 否 | AAAA 记录（IPv6） |
@@ -268,6 +272,7 @@ GET /api/zones?pattern=%5Eaaa%5C%5C.bbb%5C%5C.com%5C%5C.%3F%24
 ```yaml
 zones:
   example.com:
+    mode: simple
     default:
       mx:
         - "10 mail.example.com."

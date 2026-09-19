@@ -2,9 +2,9 @@
 
 [README](../README.md) · [API reference](API_EN.md) · [中文](CONFIG.md)
 
-The Go entry point is in `src/`. From the repository root, build with `mkdir -p local && go build -o local/dns-server ./src`. By default the server reads `local/config.yaml`; use `./local/dns-server -config /path/to/config.yaml` to select another file. If the file is missing, the server creates it from the [template embedded in the binary](../src/config/default_config.yaml), which defaults to SQLite. An existing file is never overwritten.
+The Go entry point is in `src/`. From the repository root, build with `mkdir -p local && go build -o local/dns-server ./src`. A directly run binary uses `config.yaml` in the current working directory; a system-installed binary uses `/etc/calidns/config.yaml`. Use `./local/dns-server -config /path/to/config.yaml` to select another file. If missing, the server creates it from the [template embedded in the binary](../src/config/default_config.yaml), filling in active non-loopback IP addresses and defaulting to SQLite. An existing file is never overwritten.
 
-`local/` is ignored by Git and is intended for machine-specific configuration, credentials, databases, GeoIP data, and binaries. Manual YAML changes require a restart. Zone changes made through the [HTTP API](API_EN.md) take effect immediately and are saved to the configuration file.
+The default `config.yaml` and database files in the repository root are ignored by Git. `local/` remains available for local binaries and data. Manual YAML changes require a restart. Zone changes made through the [HTTP API](API_EN.md) take effect immediately and are saved to the configuration file.
 
 ## Complete example
 
@@ -12,8 +12,9 @@ Replace the example database password and API token before deployment.
 
 ```yaml
 server:
-  listen: ":53"
-  listen_ipv6: ""                 # For example, "[::]:53"; empty disables IPv6 listening
+  listen:
+    - "192.0.2.42:53"
+    - "[2001:db8::42]:53"
   default_ttl: 300
   default_record: false
   default_response: "refuse"     # refuse | nxdomain | servfail
@@ -50,6 +51,7 @@ database:
 
 zones:
   example.com:
+    mode: simple
     default:
       a: ["192.0.2.10"]
       aaaa: ["2001:db8::10"]
@@ -73,8 +75,7 @@ zones:
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `listen` | `:53` | IPv4 UDP/TCP address; `:53` listens on all IPv4 interfaces. |
-| `listen_ipv6` | empty | Optional IPv6 UDP/TCP address, for example `[::]:53`. |
+| `listen` | Local active non-loopback addresses on port 53 | List of IPv4 or IPv6 UDP/TCP addresses. Each entry gets both sockets. The generated list is a snapshot; edit it after network address changes. |
 | `default_ttl` | `300` | TTL in seconds when a zone has no `ttl`; non-positive values use the default. |
 | `default_record` | `false` | Record DNS queries unless a zone overrides `record`. |
 | `default_response` | `refuse` | Response for unmatched zones: `refuse`, `nxdomain`, or `servfail`. |
@@ -82,6 +83,8 @@ zones:
 | `enable_geoip_mmap` | `false` | `false`: compact Go heap index; `true`: file-mapped compact index. Requires restart. |
 | `geoip_update_url` | empty | Direct HTTP(S) URL for the GeoIP data file; empty disables automatic updates. |
 | `geoip_update_interval` | `24h` when a URL is set | Positive Go duration such as `12h` or `48h`. |
+
+Older configurations with a scalar `listen` value must change it to a list. Put any former `listen_ipv6` address in the same list. The generated list is only created for a missing config file; it does not update automatically when interfaces change.
 
 Geo lookup order is: existing IPv4 `/24` in-memory cache → `geo_cache.db` SQLite cache → local `geoip.dat` → API fallback. Put `geoip.dat` beside the selected configuration file. If it is absent, lookup can still use the cache or API. The file supplies country codes only, not city or ASN. IPv6 does not use the `/24` cache; it checks the local index or API directly.
 
@@ -117,10 +120,11 @@ Omit `cluster` for standalone operation. With `mode: master`, a node forwards AP
 
 ## `zones`: patterns, countries, and records
 
-Each `zones` key is a domain name or Go regular expression. A plain name such as `example.com` is converted to an exact match. A key containing regex metacharacters is used as written, for example `'^www\.example\.com\.?$'`. Query names are lowercased; lowercase zone keys are recommended. Avoid overlapping patterns because zone iteration uses a map and match precedence is not guaranteed.
+Each zone can select how its key is matched. `mode: simple` treats the key as an exact DNS name, case-insensitively and with an optional trailing dot. `mode: golang` treats the key as a Go regular expression, for example `'^www\.example\.com\.?$'`. When `mode` is omitted, the legacy behavior remains: plain names are exact and keys containing regex metacharacters are treated as regular expressions. Avoid overlapping patterns because zone iteration uses a map and match precedence is not guaranteed.
 
 | Zone field | Description |
 | --- | --- |
+| `mode` | `simple` for an exact domain or `golang` for a Go regular expression; omitted preserves legacy auto-detection. |
 | `default` | Fallback record set when no country branch matches; normally provide one. |
 | `JP`, `US`, etc. | Complete record set for that country; **does not merge missing record types from `default`**. |
 | `ttl` | Zone TTL in seconds; omitted uses `server.default_ttl`. |

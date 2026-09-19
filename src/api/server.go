@@ -196,6 +196,7 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Pattern   string                        `json:"pattern"`
+		Mode      string                        `json:"mode,omitempty"`
 		Countries map[string]resolver.RecordSet `json:"countries"`
 		TTL       *int                          `json:"ttl,omitempty"`
 		Record    *bool                         `json:"record,omitempty"`
@@ -230,6 +231,7 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 	ze := resolver.ZoneEntry{
 		Pattern:   req.Pattern,
 		Regex:     req.Pattern,
+		Mode:      req.Mode,
 		Countries: req.Countries,
 		TTL:       req.TTL,
 		Record:    req.Record,
@@ -237,7 +239,7 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.resolver.UpsertZone(req.Pattern, ze) {
-		writeError(w, http.StatusBadRequest, "invalid regex pattern")
+		writeError(w, http.StatusBadRequest, "invalid zone mode or pattern")
 		return
 	}
 

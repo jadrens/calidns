@@ -4,7 +4,7 @@
 
 ## Overview and authentication
 
-The API is disabled by default. Enable it with `server.api.enabled: true` in `local/config.yaml`; its default listen address is `:3101`. Requests and responses use JSON. CORS is enabled and configurable in `server.api.cors`.
+The API is disabled by default. Enable it with `server.api.enabled: true` in the active config file; its default listen address is `:3101`. Requests and responses use JSON. CORS is enabled and configurable in `server.api.cors`.
 
 All endpoints except `GET /api/health` require an `Authorization: Bearer <token>` header **when tokens are configured**. If `server.api.tokens` is empty, authentication is disabled; do not expose such an API publicly. `OPTIONS` preflight requests return `204` without authentication.
 
@@ -73,17 +73,18 @@ GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API
 }
 ```
 
-Success returns `{"status":"ok"}`. Invalid values or a body with no writable fields return `400`. Accepted changes are saved to the active configuration file (normally `local/config.yaml`) and forwarded by a master to configured slaves. Listener addresses, mmap mode, and update settings are read-only through this endpoint.
+Success returns `{"status":"ok"}`. Invalid values or a body with no writable fields return `400`. Accepted changes are saved to the active configuration file and forwarded by a master to configured slaves. Listener addresses, mmap mode, and update settings are read-only through this endpoint.
 
 ### Zones
 
-`GET /api/zones` returns `{"total": N, "zones": [...]}`. Supply `?pattern=<url-encoded-pattern>` to get one zone; a missing pattern returns `404`. Each zone includes `pattern`, `regex`, `countries`, `ttl`, `record`, and `fast_open`.
+`GET /api/zones` returns `{"total": N, "zones": [...]}`. Supply `?pattern=<url-encoded-pattern>` to get one zone; a missing pattern returns `404`. Each zone includes `pattern`, `regex`, `mode`, `countries`, `ttl`, `record`, and `fast_open`.
 
 `POST /api/zones` and `PUT /api/zones` both upsert a zone. A new pattern creates a zone; an existing pattern replaces it. Changes take effect immediately and are saved. Example:
 
 ```json
 {
   "pattern": "example.com",
+  "mode": "simple",
   "countries": {
     "default": {
       "a": ["192.0.2.10"],
@@ -105,6 +106,7 @@ Success returns `{"status":"ok"}`. Invalid values or a body with no writable fie
 | Field | Type | Description |
 | --- | --- | --- |
 | `pattern` | string | Required domain name or Go regular expression. |
+| `mode` | string | `simple` matches `pattern` as an exact DNS name; `golang` uses it as a Go regular expression. Omit for legacy auto-detection. |
 | `countries` | object | Country code to record-set mapping; `default` is the fallback. |
 | `ttl` | integer | Zone TTL in seconds; omitted uses the server default. |
 | `record` | boolean | Record queries for this zone. |

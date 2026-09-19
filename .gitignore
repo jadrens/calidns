@@ -6,3 +6,9 @@
 /queries.db*
 /geoip.dat
 /dns-server
+/dist/
+
+
+.codex
+.claude
+.agents

@@ -4,6 +4,22 @@ A Go authoritative DNS server with GeoIP-aware responses, a management API, and 
 
 It supports A, AAAA, TXT, CNAME, MX, NS, SRV, CAA, PTR, and SOA records, plus additional DNS record types through the `other` field. Zones can have country-specific record sets. Query and EDNS history can be stored in SQLite (the standalone default) or PostgreSQL.
 
+## One-click install
+
+Install the latest release on Linux amd64 or arm64:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jadrens/calidns/main/scripts/install.sh | sudo bash
+```
+
+The installer detects the distribution and architecture, verifies the release checksum, and chooses the native `.deb` or `.rpm` package where supported. Alpine, Arch, and other Linux distributions receive the static musl binary. It also creates `/etc/calidns`, then enables and starts a `calidns` service with systemd or OpenRC when either is active.
+
+The generated configuration is `/etc/calidns/config.yaml`. To install a specific release, set `CALIDNS_VERSION`, for example:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jadrens/calidns/main/scripts/install.sh | sudo CALIDNS_VERSION=v1.2.3 bash
+```
+
 ## Build and run
 
 Requirements: Go 1.26.4 (as specified in [go.mod](go.mod)) and a C compiler with CGO enabled for the SQLite driver.
@@ -14,13 +30,14 @@ go build -o local/dns-server ./src
 ./local/dns-server
 ```
 
-On first start, the server generates `local/config.yaml` from the embedded [default template](src/config/default_config.yaml). Existing configuration files are not overwritten. Start it from the repository root so the default `local/` paths resolve as shown. Use `-config /path/to/config.yaml` to select another file; GeoIP data and the Geo cache are stored beside that file, and a relative `database.sqlite_path` is resolved from its directory.
+On first start, a directly run binary generates `config.yaml` in its current working directory. A binary installed in a system bin directory uses `/etc/calidns/config.yaml`. The file is generated from the embedded [default template](src/config/default_config.yaml), with port 53 listeners for the machine's active non-loopback IP addresses. Existing files are not overwritten. Use `-config /path/to/config.yaml` to select another file; GeoIP data and the Geo cache are stored beside that file, and a relative `database.sqlite_path` is resolved from its directory.
 
-The default DNS listener is UDP/TCP port 53, which may require elevated privileges. For local testing, set `server.listen: ":1053"` in `local/config.yaml`, add a zone, then restart:
+The generated DNS listeners use UDP/TCP port 53, which may require elevated privileges. For local testing, edit `config.yaml` to use a free address and port, such as `server.listen: ["127.0.0.1:1053"]`, add a zone, then restart:
 
 ```yaml
 zones:
   example.com:
+    mode: simple
     default:
       a: ["192.0.2.10"]
       aaaa: ["2001:db8::10"]
@@ -35,9 +52,9 @@ The generated configuration starts with no zones, so DNS requests will use `serv
 
 ## Configuration
 
-- `local/config.yaml`: server, API, cluster, database, and zone settings. The `local/` directory is ignored by Git and is intended for configuration, credentials, databases, GeoIP data, and local binaries.
-- `database.type: sqlite`: stores query and EDNS history in `database.sqlite_path` (default `local/queries.db`). Any other type value uses PostgreSQL connection fields.
-- `local/geoip.dat`: optional local GeoIP country database. The resolver checks the SQLite Geo cache before the local file and can use an API fallback. `server.enable_geoip_mmap` selects a file-backed index; `server.geoip_update_url` and `server.geoip_update_interval` enable automatic updates.
+- `config.yaml` (or `/etc/calidns/config.yaml` for system installs): server, API, cluster, database, and zone settings. The `local/` directory remains ignored by Git for local binaries and data.
+- `database.type: sqlite`: stores query and EDNS history in `database.sqlite_path` (default `queries.db` beside the config file). Any other type value uses PostgreSQL connection fields.
+- `geoip.dat` beside the config file: optional local GeoIP country database. The resolver checks the SQLite Geo cache before the local file and can use an API fallback. `server.enable_geoip_mmap` selects a file-backed index; `server.geoip_update_url` and `server.geoip_update_interval` enable automatic updates.
 - `server.api.enabled`: enables the HTTP management API on `:3101` by default. Configure `server.api.tokens` before exposing it.
 
 Documentation: [Configuration guide](docs/CONFIG_EN.md) · [API reference](docs/API_EN.md) · [配置文档](docs/CONFIG.md) · [API 文档](docs/API.md).
@@ -49,6 +66,12 @@ go test ./...
 ```
 
 Some GeoIP tests start a local HTTP test server and therefore require loopback socket access. Source code is under `src/`; the Go module remains at the repository root.
+
+## Releases
+
+On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. The script requires Go, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. The packages install `dns-server` in `/usr/bin`, where it uses `/etc/calidns/config.yaml` by default. The `.tar.zst` contains the binary, README, and license; the musl `.bin` is a standalone binary.
+
+To publish on GitHub, push an existing tag such as `v1.2.3`, then start **Publish release** from the Actions tab and enter the tag. The workflow builds both Linux architectures, runs the Go tests, generates SHA-256 checksums, and publishes the assets to a GitHub release.
 
 ## License
 

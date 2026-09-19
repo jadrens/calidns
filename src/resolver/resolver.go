@@ -25,6 +25,7 @@ type Answer struct {
 type ZoneEntry struct {
 	Pattern   string               `json:"pattern"`
 	Regex     string               `json:"regex"`
+	Mode      string               `json:"mode,omitempty"`
 	Countries map[string]RecordSet `json:"countries"`
 	TTL       *int                 `json:"ttl,omitempty"`
 	Record    *bool                `json:"record,omitempty"`
@@ -79,6 +80,29 @@ func normalizePattern(p string) string {
 	return "^" + strings.ReplaceAll(p, ".", "\\.") + "\\.?$"
 }
 
+// compilePattern applies the explicitly selected matching mode. An omitted
+// mode retains the legacy auto-detection behaviour for existing configs.
+func compilePattern(pattern, mode string) (*regexp.Regexp, string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "simple":
+		name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pattern)), ".")
+		if name == "" {
+			return nil, mode, fmt.Errorf("simple domain is empty")
+		}
+		re, err := regexp.Compile("^" + regexp.QuoteMeta(name) + "\\.?$")
+		return re, mode, err
+	case "golang":
+		re, err := regexp.Compile(pattern)
+		return re, mode, err
+	case "":
+		re, err := regexp.Compile(normalizePattern(pattern))
+		return re, mode, err
+	default:
+		return nil, mode, fmt.Errorf("unknown zone mode %q", mode)
+	}
+}
+
 // New creates a new Resolver from the server configuration.
 func New(cfg *config.Config) *Resolver {
 	r := &Resolver{
@@ -89,11 +113,12 @@ func New(cfg *config.Config) *Resolver {
 	}
 
 	for pattern, zc := range cfg.Zones {
-		re, err := regexp.Compile(normalizePattern(pattern))
+		re, mode, err := compilePattern(pattern, zc.Mode)
 		if err != nil {
-			log.Printf("[DEBUG] failed to compile pattern %q: %v", pattern, err)
+			log.Printf("[DEBUG] failed to compile pattern %q with mode %q: %v", pattern, zc.Mode, err)
 			continue
 		}
+		zc.Mode = mode
 		r.zones = append(r.zones, zoneEntry{
 			patternStr: pattern,
 			pattern:    re,
@@ -182,6 +207,7 @@ func (r *Resolver) ListZones() []ZoneEntry {
 		out = append(out, ZoneEntry{
 			Pattern:   ze.patternStr,
 			Regex:     ze.patternStr,
+			Mode:      ze.config.Mode,
 			Countries: countries,
 			TTL:       ze.config.TTL,
 			Record:    ze.config.Record,
@@ -217,6 +243,7 @@ func (r *Resolver) GetZone(pattern string) *ZoneEntry {
 			return &ZoneEntry{
 				Pattern:   ze.patternStr,
 				Regex:     ze.patternStr,
+				Mode:      ze.config.Mode,
 				Countries: countries,
 				TTL:       ze.config.TTL,
 				Record:    ze.config.Record,
@@ -230,7 +257,7 @@ func (r *Resolver) GetZone(pattern string) *ZoneEntry {
 // UpsertZone adds or replaces a zone. If the pattern already exists it is
 // updated in-place; otherwise appended. Returns false if the regex is invalid.
 func (r *Resolver) UpsertZone(pattern string, ze ZoneEntry) bool {
-	re, err := regexp.Compile(normalizePattern(pattern))
+	re, mode, err := compilePattern(pattern, ze.Mode)
 	if err != nil {
 		return false
 	}
@@ -254,6 +281,7 @@ func (r *Resolver) UpsertZone(pattern string, ze ZoneEntry) bool {
 
 	zc := &config.ZoneConfig{
 		Countries: countries,
+		Mode:      mode,
 		TTL:       ze.TTL,
 		Record:    ze.Record,
 		FastOpen:  ze.FastOpen,
@@ -322,6 +350,7 @@ func (r *Resolver) DumpZones() map[string]*config.ZoneConfig {
 		}
 		zc := &config.ZoneConfig{
 			Countries: countries,
+			Mode:      ze.config.Mode,
 		}
 		if ze.config.TTL != nil {
 			ttl := *ze.config.TTL

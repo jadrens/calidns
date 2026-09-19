@@ -3,8 +3,11 @@ package config
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -17,8 +20,8 @@ func TestGenerateDefaultEmbeddedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(generated, []byte(defaultConfigYAML)) {
-		t.Fatal("generated config differs from embedded template")
+	if bytes.Contains(generated, []byte("listen: []")) {
+		t.Fatal("generated config has no listener addresses")
 	}
 	cfg, err := Load(path)
 	if err != nil {
@@ -27,12 +30,67 @@ func TestGenerateDefaultEmbeddedTemplate(t *testing.T) {
 	if cfg.Database.Type != "sqlite" || cfg.Database.SQLitePath != "queries.db" {
 		t.Fatalf("unexpected default database: %+v", cfg.Database)
 	}
+	if len(cfg.Server.Listen) == 0 {
+		t.Fatal("generated config has no listeners")
+	}
 	if err := GenerateDefault(path); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("generating over existing config: got %v, want os.ErrExist", err)
 	}
 	unchanged, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(unchanged, generated) {
 		t.Fatalf("existing config changed: %v", err)
+	}
+}
+
+func TestListenAddressesExcludesLoopbackAndDownInterfaces(t *testing.T) {
+	interfaces := []net.Interface{
+		{Name: "lo", Flags: net.FlagUp | net.FlagLoopback},
+		{Name: "down", Flags: 0},
+		{Name: "eth0", Flags: net.FlagUp},
+	}
+	addrs := map[string][]net.Addr{
+		"lo":   {&net.IPNet{IP: net.ParseIP("127.0.0.53")}},
+		"down": {&net.IPNet{IP: net.ParseIP("192.0.2.10")}},
+		"eth0": {
+			&net.IPNet{IP: net.ParseIP("192.0.2.42")},
+			&net.IPNet{IP: net.ParseIP("127.0.0.2")},
+			&net.IPNet{IP: net.ParseIP("2001:db8::42")},
+			&net.IPNet{IP: net.ParseIP("fe80::42")},
+		},
+	}
+	got, err := listenAddresses(interfaces, func(iface net.Interface) ([]net.Addr, error) {
+		return addrs[iface.Name], nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"192.0.2.42:53", "[2001:db8::42]:53", "[fe80::42%eth0]:53"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listeners = %v, want %v", got, want)
+	}
+}
+
+func TestListenAddressesRequiresNonLoopbackIP(t *testing.T) {
+	_, err := listenAddresses([]net.Interface{{Name: "lo", Flags: net.FlagUp | net.FlagLoopback}}, func(net.Interface) ([]net.Addr, error) {
+		t.Fatal("loopback interface should not be inspected")
+		return nil, nil
+	})
+	if err == nil {
+		t.Fatal("expected an error when no non-loopback address exists")
+	}
+}
+
+func TestLoadListenerList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  listen:\n    - '192.0.2.42:53'\n    - '[2001:db8::42]:53'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.Server.Listen, ",") != "192.0.2.42:53,[2001:db8::42]:53" {
+		t.Fatalf("listeners = %v", cfg.Server.Listen)
 	}
 }
 
@@ -59,6 +117,41 @@ func TestEnableGeoIPMmap(t *testing.T) {
 				t.Fatalf("enable_geoip_mmap = %v, want %v", cfg.Server.EnableGeoIPMmap, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadZoneModes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+server:
+  listen: ["127.0.0.1:1053"]
+zones:
+  example.com:
+    mode: simple
+    default:
+      a: ["192.0.2.10"]
+  '^api\.example\.com\.?$':
+    mode: golang
+    default:
+      a: ["192.0.2.20"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Zones["example.com"].Mode != "simple" || cfg.Zones[`^api\.example\.com\.?$`].Mode != "golang" {
+		t.Fatalf("zone modes were not loaded: %+v", cfg.Zones)
+	}
+
+	invalid := strings.Replace(contents, "mode: simple", "mode: wildcard", 1)
+	if err := os.WriteFile(path, []byte(invalid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must be simple or golang") {
+		t.Fatalf("invalid mode error = %v", err)
 	}
 }
 

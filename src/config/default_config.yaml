@@ -2,8 +2,8 @@
 # See docs/CONFIG.md for all options.
 
 server:
-  listen: ":53"                 # IPv4 UDP/TCP listen address
-  listen_ipv6: ""               # Optional IPv6 address, e.g. "[::]:53"
+  # Generated from active, non-loopback interfaces at first start.
+  listen: []
   default_ttl: 300
   default_record: false
   default_response: "refuse"    # refuse | nxdomain | servfail
@@ -47,6 +47,7 @@ zones: {}
 # Example zone:
 # zones:
 #   example.com:
+#     mode: "simple"           # simple: exact domain; golang: Go regular expression
 #     default:
 #       a: ["192.0.2.10"]
 #       aaaa: ["2001:db8::10"]

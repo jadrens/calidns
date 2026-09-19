@@ -3,8 +3,11 @@ package config
 import (
 	_ "embed"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +32,7 @@ type RecordSet struct {
 // ZoneConfig holds per-country record sets and zone-level settings.
 type ZoneConfig struct {
 	Countries map[string]*RecordSet `yaml:",inline"`
+	Mode      string                `yaml:"mode,omitempty"`
 	TTL       *int                  `yaml:"ttl,omitempty"`
 	Record    *bool                 `yaml:"record,omitempty"`
 	FastOpen  *bool                 `yaml:"fast_open,omitempty"`
@@ -54,8 +58,7 @@ type CORSConfig struct {
 
 // ServerConfig holds top-level server settings.
 type ServerConfig struct {
-	Listen              string    `yaml:"listen"`
-	ListenIPv6          string    `yaml:"listen_ipv6"`
+	Listen              []string  `yaml:"listen"`
 	DefaultTTL          int       `yaml:"default_ttl"`
 	DefaultRecord       bool      `yaml:"default_record"`
 	DefaultResponse     string    `yaml:"default_response"`
@@ -118,7 +121,7 @@ func Load(path string) (*Config, error) {
 
 	// Second pass: unmarshal each zone individually to separate
 	// known country keys from the reserved ttl/record keys.
-	reserved := map[string]bool{"ttl": true, "record": true, "fast_open": true}
+	reserved := map[string]bool{"mode": true, "ttl": true, "record": true, "fast_open": true}
 
 	for pattern, node := range raw.Zones {
 		zc := &ZoneConfig{
@@ -134,6 +137,16 @@ func Load(path string) (*Config, error) {
 		for key, val := range zoneMap {
 			if reserved[key] {
 				switch key {
+				case "mode":
+					var mode string
+					if err := val.Decode(&mode); err != nil {
+						return nil, fmt.Errorf("parsing mode in zone %q: %w", pattern, err)
+					}
+					mode = strings.ToLower(strings.TrimSpace(mode))
+					if mode != "simple" && mode != "golang" {
+						return nil, fmt.Errorf("invalid mode %q in zone %q: must be simple or golang", mode, pattern)
+					}
+					zc.Mode = mode
 				case "ttl":
 					var t int
 					if err := val.Decode(&t); err != nil {
@@ -167,8 +180,11 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Set defaults.
-	if cfg.Server.Listen == "" {
-		cfg.Server.Listen = ":53"
+	if len(cfg.Server.Listen) == 0 {
+		cfg.Server.Listen, err = LocalListenAddresses()
+		if err != nil {
+			return nil, fmt.Errorf("finding default DNS listeners: %w", err)
+		}
 	}
 	if cfg.Server.DefaultTTL <= 0 {
 		cfg.Server.DefaultTTL = 300
@@ -258,11 +274,24 @@ func (c *Config) Save(path string) error {
 // GenerateDefault writes a default configuration file to path.
 // It will not overwrite an existing file.
 func GenerateDefault(path string) error {
+	addresses, err := LocalListenAddresses()
+	if err != nil {
+		return fmt.Errorf("finding default DNS listeners: %w", err)
+	}
+	var listen strings.Builder
+	listen.WriteString("  listen:\n")
+	for _, address := range addresses {
+		fmt.Fprintf(&listen, "    - %q\n", address)
+	}
+	contents := strings.Replace(defaultConfigYAML, "  listen: []\n", listen.String(), 1)
+	if contents == defaultConfigYAML {
+		return fmt.Errorf("default config is missing its listen placeholder")
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		return fmt.Errorf("creating default config: %w", err)
 	}
-	if _, err := f.WriteString(defaultConfigYAML); err != nil {
+	if _, err := f.WriteString(contents); err != nil {
 		f.Close()
 		os.Remove(path)
 		return fmt.Errorf("writing default config: %w", err)
@@ -271,6 +300,63 @@ func GenerateDefault(path string) error {
 		return fmt.Errorf("closing default config: %w", err)
 	}
 	return nil
+}
+
+// LocalListenAddresses returns port 53 on each active, non-loopback address.
+func LocalListenAddresses() ([]string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	return listenAddresses(interfaces, func(iface net.Interface) ([]net.Addr, error) {
+		return iface.Addrs()
+	})
+}
+
+func listenAddresses(interfaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) ([]string, error) {
+	seen := make(map[string]bool)
+	var result []string
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := addresses(iface)
+		if err != nil {
+			return nil, fmt.Errorf("reading addresses for %s: %w", iface.Name, err)
+		}
+		for _, address := range addrs {
+			var ip net.IP
+			switch a := address.(type) {
+			case *net.IPNet:
+				ip = a.IP
+			case *net.IPAddr:
+				ip = a.IP
+			default:
+				continue
+			}
+			parsed, ok := netip.AddrFromSlice(ip)
+			if !ok {
+				continue
+			}
+			parsed = parsed.Unmap()
+			if parsed.IsUnspecified() || parsed.IsLoopback() || parsed.IsMulticast() {
+				continue
+			}
+			if parsed.Is6() && parsed.IsLinkLocalUnicast() {
+				parsed = parsed.WithZone(iface.Name)
+			}
+			listen := net.JoinHostPort(parsed.String(), "53")
+			if !seen[listen] {
+				seen[listen] = true
+				result = append(result, listen)
+			}
+		}
+	}
+	sort.Strings(result)
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no active non-loopback IP addresses found")
+	}
+	return result, nil
 }
 
 // HeaderValues returns pre-joined string values for HTTP CORS headers.

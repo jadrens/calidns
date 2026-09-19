@@ -74,3 +74,56 @@ func TestValidateRecordSet(t *testing.T) {
 		t.Fatal("invalid generic record accepted")
 	}
 }
+
+func TestZoneMatchingModes(t *testing.T) {
+	records := func(ip string) map[string]*config.RecordSet {
+		return map[string]*config.RecordSet{"default": {A: []string{ip}}}
+	}
+	r := New(&config.Config{
+		Server: config.ServerConfig{DefaultTTL: 300},
+		Zones: map[string]*config.ZoneConfig{
+			"EXAMPLE.COM.": {
+				Mode:      "simple",
+				Countries: records("192.0.2.10"),
+			},
+			`^api\d+\.example\.net\.?$`: {
+				Mode:      "golang",
+				Countries: records("192.0.2.20"),
+			},
+		},
+	})
+
+	for _, name := range []string{"example.com", "Example.Com."} {
+		if answer := r.Resolve(name, dns.TypeA, ""); answer == nil || len(answer.Records) != 1 {
+			t.Fatalf("simple mode did not match %q: %+v", name, answer)
+		}
+	}
+	if answer := r.Resolve("www.example.com", dns.TypeA, ""); answer != nil {
+		t.Fatalf("simple mode matched a subdomain: %+v", answer)
+	}
+	if answer := r.Resolve("api42.example.net.", dns.TypeA, ""); answer == nil || len(answer.Records) != 1 {
+		t.Fatalf("golang mode did not match regex: %+v", answer)
+	}
+
+	zone := r.GetZone("EXAMPLE.COM.")
+	if zone == nil || zone.Mode != "simple" {
+		t.Fatalf("API view lost simple mode: %+v", zone)
+	}
+	if got := r.DumpZones()["EXAMPLE.COM."].Mode; got != "simple" {
+		t.Fatalf("config dump mode = %q", got)
+	}
+}
+
+func TestZoneMatchingLegacyMode(t *testing.T) {
+	r := New(&config.Config{
+		Server: config.ServerConfig{DefaultTTL: 300},
+		Zones: map[string]*config.ZoneConfig{
+			"example.org": {
+				Countries: map[string]*config.RecordSet{"default": {A: []string{"192.0.2.30"}}},
+			},
+		},
+	})
+	if answer := r.Resolve("example.org.", dns.TypeA, ""); answer == nil {
+		t.Fatal("omitted mode no longer preserves legacy plain-domain matching")
+	}
+}
