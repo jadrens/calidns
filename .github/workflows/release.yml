@@ -58,22 +58,22 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - uses: oven-sh/setup-bun@v2
-        if: matrix.name == 'linux-amd64'
         with:
           bun-version: 1.4.2
       - name: Install package tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm zstd musl-tools
-      - name: Test
-        if: matrix.name == 'linux-amd64'
-        run: go test ./...
+          sudo apt-get install -y rpm zstd zip musl-tools
       - name: Test dashboard
         if: matrix.name == 'linux-amd64'
         working-directory: dashboard
         run: |
           bun install --frozen-lockfile
           bun test
+          VITE_BASE_PATH=/dashboard/ bun run build -- --outDir ../internal/dashboard/dist --emptyOutDir
+      - name: Test
+        if: matrix.name == 'linux-amd64'
+        run: go test ./...
       - name: Build release assets
         env:
           RELEASE_TAG: ${{ inputs.tag }}

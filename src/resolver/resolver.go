@@ -10,7 +10,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/src/config"
+	"calidns/src/config"
 )
 
 // Answer holds the resolved DNS answer.

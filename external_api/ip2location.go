@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"dns-server/src/geo"
+	"calidns/src/geo"
 	"gopkg.in/yaml.v3"
 )
 

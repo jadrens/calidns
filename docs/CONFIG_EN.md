@@ -15,12 +15,16 @@ server:
   listen:
     - "192.0.2.42:53"
     - "[2001:db8::42]:53"
-  enable_geoip_mmap: false        # false: Go heap index; true: file-backed mmap index
-  geoip_update_url: ""            # Direct geoip.dat URL; empty disables auto-updates
-  geoip_update_interval: "24h"    # Next update is based on geoip.dat's mtime
+  geoip:
+    enable_mmap: false            # false: Go heap index; true: file-backed mmap index
+    update_url: "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat"
+    update_interval: "24h"        # Next update is based on geoip.dat's mtime
   api:
     enabled: true
     listen: ":3101"
+    dashboard:
+      url: "default"              # Or an HTTP(S) ZIP containing a dist tree
+      update_interval: "24h"      # Used only for a remote ZIP
     tokens:
       - "replace-with-a-long-random-token"
     cors:
@@ -56,9 +60,9 @@ external_api:
 | Field | Default | Description |
 | --- | --- | --- |
 | `listen` | Local active non-loopback addresses on port 53 | List of IPv4 or IPv6 UDP/TCP addresses. Each entry gets both sockets. The generated list is a snapshot; edit it after network address changes. |
-| `enable_geoip_mmap` | `false` | `false`: compact Go heap index; `true`: file-mapped compact index. Requires restart. |
-| `geoip_update_url` | empty | Direct HTTP(S) URL for the GeoIP data file; empty disables automatic updates. |
-| `geoip_update_interval` | `24h` when a URL is set | Positive Go duration such as `12h` or `48h`. |
+| `geoip.enable_mmap` | `false` | `false`: compact Go heap index; `true`: file-mapped compact index. Requires restart. |
+| `geoip.update_url` | v2fly GeoIP on jsDelivr | Direct HTTP(S) URL for the GeoIP data file. Empty or omitted uses the default upstream. |
+| `geoip.update_interval` | `24h` | Positive Go duration such as `12h` or `48h`. |
 
 Older configurations with a scalar `listen` value must change it to a list. Put any former `listen_ipv6` address in the same list. The generated list is only created for a missing config file; it does not update automatically when interfaces change.
 
@@ -66,9 +70,9 @@ Geo lookup order is: existing IPv4 `/24` in-memory cache → `geo_cache.db` SQLi
 
 Commercial integrations live under `external_api`. The core `geo.Provider` accepts an IP and returns nullable `CountryCode`, `SubLocation`, `ASN`, and `ASNName` values. The bundled ip2location provider reads `external_api.geo_ip_api_key`; an empty or `none` key disables it.
 
-With `enable_geoip_mmap: true`, startup creates a temporary compact index beside `geoip.dat`, maps it, and unlinks the temporary file. That directory must be writable. Without mmap, the process retains only the compact lookup index in Go memory, not the original `geoip.dat` contents.
+With `geoip.enable_mmap: true`, startup creates a temporary compact index beside `geoip.dat`, maps it, and unlinks the temporary file. That directory must be writable. Without mmap, the process retains only the compact lookup index in Go memory, not the original `geoip.dat` contents.
 
-When `geoip_update_url` is set, the next update is due at **`geoip.dat` mtime + `geoip_update_interval`**. A missing or overdue file triggers an immediate download at startup; otherwise the server waits for the remaining interval. The URL must serve a raw `geoip.dat` file, not a ZIP, HTML page, or API JSON. A replacement is validated and indexed before the on-disk file and live index are switched. Failed updates keep the old data and retry after a backoff from one minute to one hour. A successful update sets the file mtime to the update time. Existing SQLite `/24` cache entries take precedence until they expire or are deleted. Manually replacing `geoip.dat` still requires a restart.
+The next update is due at **`geoip.dat` mtime + `geoip.update_interval`**. A missing or overdue file triggers an immediate download at startup; otherwise the server waits for the remaining interval. The URL must serve a raw `geoip.dat` file, not a ZIP, HTML page, or API JSON. A replacement is validated and indexed before the on-disk file and live index are switched. Failed updates keep the old data and retry after a backoff from one minute to one hour. A successful update sets the file mtime to the update time. Existing SQLite `/24` cache entries take precedence until they expire or are deleted. Manually replacing `geoip.dat` still requires a restart.
 
 Use a trusted HTTPS source. Automatic updates require write access to the config directory, and briefly holding both old and new indexes may increase memory use during replacement.
 
@@ -78,6 +82,8 @@ Use a trusted HTTPS source. Automatic updates require write access to the config
 | --- | --- | --- |
 | `enabled` | `false` | Start the HTTP API. |
 | `listen` | `:3101` | HTTP listen address. |
+| `dashboard.url` | `default` | Empty disables the route; `default` serves the embedded UI; an HTTP(S) URL downloads a ZIP containing `index.html` and its `dist` assets. All enabled modes are served locally at `/dashboard`. |
+| `dashboard.update_interval` | `24h` | Positive refresh interval for a remote dashboard ZIP. Failed updates retain the last valid build. |
 | `tokens` | empty | Bearer tokens. **An empty list disables authentication**; set tokens in production. |
 | `cors.allow_origins` | `["*"]` | Allowed origins; omitted means all origins. |
 | `cors.allow_methods` | GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH | Allowed methods. |
@@ -86,7 +92,7 @@ Use a trusted HTTPS source. Automatic updates require write access to the config
 | `cors.max_age` | `0` | CORS preflight cache lifetime in seconds. |
 | `cors.allow_credentials` | `false` | Whether to emit the CORS credentials header. |
 
-See the [API reference](API_EN.md) for paths and examples. `GET /api/server` displays GeoIP mmap and update settings, but `PUT /api/server` does not hot-swap them; edit YAML and restart for those settings.
+See the [API reference](API_EN.md) for paths and examples. `GET /api/server` returns grouped `geoip` and `dashboard` settings. The dashboard URL is derived from the request host and scheme. `PUT /api/server` does not hot-swap these settings; edit YAML and restart to change them.
 
 ## `database` and `cluster`
 

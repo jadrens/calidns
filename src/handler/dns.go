@@ -8,10 +8,10 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/src/config"
-	"dns-server/src/geo"
-	"dns-server/src/recorder"
-	"dns-server/src/resolver"
+	"calidns/src/config"
+	"calidns/src/geo"
+	"calidns/src/recorder"
+	"calidns/src/resolver"
 )
 
 // Handler implements dns.Handler for an authoritative DNS server.

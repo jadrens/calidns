@@ -11,9 +11,9 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/src/config"
-	"dns-server/src/dnsdata"
-	"dns-server/src/resolver"
+	"calidns/src/config"
+	"calidns/src/dnsdata"
+	"calidns/src/resolver"
 )
 
 func TestZoneAPIAdditionalRecordsRoundTrip(t *testing.T) {
@@ -28,7 +28,10 @@ func TestZoneAPIAdditionalRecordsRoundTrip(t *testing.T) {
 		Zones:  map[string]*config.ZoneConfig{},
 	}
 	res := resolver.New(cfg)
-	server := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, store)
+	server, err := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := []byte(`{
 		"pattern":"example.com",
 		"mode":"simple",
@@ -91,7 +94,10 @@ func TestServerDefaultsPersistWithoutRewritingYAML(t *testing.T) {
 	}
 	defer store.Close()
 	cfg := &config.Config{Server: config.ServerConfig{DefaultTTL: 300, DefaultResponse: "refuse"}, Zones: map[string]*config.ZoneConfig{}}
-	server := NewServer(resolver.New(cfg), nil, nil, nil, config.CORSConfig{}, cfg, store)
+	server, err := NewServer(resolver.New(cfg), nil, nil, nil, config.CORSConfig{}, cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/server", bytes.NewReader([]byte(`{"default_ttl":600,"default_response":"nxdomain","default_record":true}`))))
 	if w.Code != http.StatusOK {
@@ -116,7 +122,10 @@ func TestServerDefaultsPersistWithoutRewritingYAML(t *testing.T) {
 func TestZoneAPIRejectsInvalidMode(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{DefaultTTL: 300}, Zones: map[string]*config.ZoneConfig{}}
 	res := resolver.New(cfg)
-	server := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	server, err := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := []byte(`{"pattern":"example.com","mode":"wildcard","countries":{"default":{"a":["192.0.2.10"]}}}`)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/zones", bytes.NewReader(body)))
@@ -131,7 +140,10 @@ func TestZoneAPIRejectsInvalidMode(t *testing.T) {
 func TestZoneAPIRejectsInvalidRecord(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{DefaultTTL: 300}, Zones: map[string]*config.ZoneConfig{}}
 	res := resolver.New(cfg)
-	server := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	server, err := NewServer(res, nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := []byte(`{"pattern":"example.com","countries":{"default":{"mx":["invalid mail.example.com."]}}}`)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/zones", bytes.NewReader(body)))

@@ -63,14 +63,15 @@ Documentation: [Configuration guide](docs/CONFIG_EN.md) · [API reference](docs/
 ## Development
 
 ```sh
+(cd dashboard && bun install --frozen-lockfile && VITE_BASE_PATH=/dashboard/ bun run build -- --outDir ../internal/dashboard/dist --emptyOutDir)
 go test ./...
 ```
 
-Some GeoIP tests start a local HTTP test server and therefore require loopback socket access. Source code is under `src/`; the Go module remains at the repository root.
+The dashboard build is required because the Go binary embeds `internal/dashboard/dist`. Some GeoIP tests start a local HTTP test server and therefore require loopback socket access. Source code is under `src/`; the Go module remains at the repository root.
 
 ## Releases
 
-On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `calidns` `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. On amd64 it also uses Bun and Vite to create the architecture-independent `calidns-dashboard_1.2.3.tar.zst` static dashboard package. Initialize the `dashboard` submodule first. The script requires Go, Bun on amd64, `dpkg-deb`, `rpmbuild`, `zstd`, and `musl-gcc`. Native packages install `/usr/bin/calidns` and a `calidns.service` definition, but do not enable or start it. The dashboard archive can be extracted into any static web root; configure that host to fall back to `index.html` for client-side routes.
+On Linux amd64 or arm64, run `bash scripts/build-release.sh v1.2.3` to create `calidns` `.deb`, `.rpm`, `.tar.zst`, and static musl `.bin` assets for the host architecture in `dist/`. The script first builds the dashboard, which is embedded in every server binary and served at `/dashboard` when `server.api.dashboard.url` is `default`. A remote HTTP(S) ZIP containing the same `dist` tree can be configured instead and refreshed on `server.api.dashboard.update_interval`. The amd64 job also creates architecture-independent `.tar.zst` and `.zip` dashboard packages; the ZIP has `index.html` and `assets/` at its root and can be used directly as `dashboard.url`. Initialize the `dashboard` submodule first. The script requires Go, Bun, `dpkg-deb`, `rpmbuild`, `zstd`, `zip`, and `musl-gcc`. Native packages install `/usr/bin/calidns` and a `calidns.service` definition, but do not enable or start it. The standalone dashboard archive can be extracted into any static web root; configure that host to fall back to `index.html` for client-side routes.
 
 To publish on GitHub, first commit and push the release changes to `main`, then create and push a tag pointing at that commit, for example `git tag v1.2.3 && git push origin main v1.2.3`. From the Actions tab, run **Publish release** from `main` and enter the tag. The workflow verifies that the remote tag exists, builds both Linux server architectures and the Vite dashboard from that tag, runs their tests, generates SHA-256 checksums, and publishes all assets to a GitHub release.
 

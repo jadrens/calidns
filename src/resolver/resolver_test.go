@@ -6,7 +6,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/src/config"
+	"calidns/src/config"
 )
 
 func TestAdditionalRecordTypes(t *testing.T) {

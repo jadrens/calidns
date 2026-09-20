@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
-	"dns-server/src/config"
-	"dns-server/src/dnsdata"
-	"dns-server/src/geo"
-	"dns-server/src/recorder"
-	"dns-server/src/resolver"
+	"calidns/internal/dashboard"
+	"calidns/src/config"
+	"calidns/src/dnsdata"
+	"calidns/src/geo"
+	"calidns/src/recorder"
+	"calidns/src/resolver"
 )
 
 // Server handles HTTP API requests.
@@ -26,6 +28,7 @@ type Server struct {
 	tokens    map[string]struct{} // set of valid bearer tokens
 	cfg       *config.Config      // server config (for persisting zone changes)
 	dnsStore  *dnsdata.Store      // Web-API-managed DNS data
+	dashboard *dashboard.Handler  // built-in or downloaded dashboard assets
 
 	// Cluster sync.
 	clusterMode string   // "master", "slave", or empty
@@ -43,7 +46,7 @@ type Server struct {
 }
 
 // NewServer creates a new API server.
-func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lookuper, tokens []string, corsCfg config.CORSConfig, cfg *config.Config, dnsStore *dnsdata.Store) *Server {
+func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lookuper, tokens []string, corsCfg config.CORSConfig, cfg *config.Config, dnsStore *dnsdata.Store) (*Server, error) {
 	tokenSet := make(map[string]struct{}, len(tokens))
 	for _, t := range tokens {
 		if t = strings.TrimSpace(t); t != "" {
@@ -52,6 +55,18 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 	}
 
 	origin, methods, headers, expose, maxAge, creds := corsCfg.HeaderValues()
+	var dashboardHandler *dashboard.Handler
+	if cfg.Server.API.Dashboard.URL != "" {
+		var err error
+		var interval time.Duration
+		if cfg.Server.API.Dashboard.URL != "default" {
+			interval, _ = time.ParseDuration(cfg.Server.API.Dashboard.UpdateInterval)
+		}
+		dashboardHandler, err = dashboard.NewHandler(cfg.Server.API.Dashboard.URL, interval)
+		if err != nil {
+			return nil, fmt.Errorf("loading dashboard: %w", err)
+		}
+	}
 
 	s := &Server{
 		resolver:        res,
@@ -61,6 +76,7 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 		tokens:          tokenSet,
 		cfg:             cfg,
 		dnsStore:        dnsStore,
+		dashboard:       dashboardHandler,
 		clusterMode:     cfg.Cluster.Mode,
 		slaves:          cfg.Cluster.Slaves,
 		masterURL:       cfg.Cluster.Master,
@@ -73,7 +89,7 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 		corsCredentials: creds,
 	}
 	s.registerRoutes()
-	return s
+	return s, nil
 }
 
 // ServeHTTP implements http.Handler.
@@ -90,6 +106,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mux.ServeHTTP(w, r)
 		return
 	}
+	// The dashboard shell and static assets are public. API calls made by the
+	// dashboard still pass through bearer-token authentication below.
+	if s.cfg.Server.API.Dashboard.URL != "" &&
+		(r.URL.Path == "/dashboard" || strings.HasPrefix(r.URL.Path, "/dashboard/")) {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
 
 	// Log cluster-forwarded requests on slave.
 	if s.clusterMode == "slave" && r.Header.Get("X-Cluster-Forward") == "master" {
@@ -103,6 +126,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mux.ServeHTTP(w, r)
+}
+
+// Close stops background API resources such as remote dashboard updates.
+func (s *Server) Close() error {
+	if s.dashboard != nil {
+		return s.dashboard.Close()
+	}
+	return nil
 }
 
 func (s *Server) authenticate(r *http.Request) bool {
@@ -134,6 +165,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/geo-cache", s.handleGeoCache)
 	s.mux.HandleFunc("/api/edns", s.handleEDNS)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
+	if s.cfg.Server.API.Dashboard.URL != "" {
+		s.mux.HandleFunc("/dashboard", s.handleDashboardRoot)
+		s.mux.Handle("/dashboard/", s.dashboard)
+	}
+}
+
+func (s *Server) handleDashboardRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	http.Redirect(w, r, "/dashboard/", http.StatusTemporaryRedirect)
 }
 
 // --- Zone handlers ---
@@ -517,14 +560,34 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getServerConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"listen":                s.cfg.Server.Listen,
-		"default_ttl":           s.cfg.Server.DefaultTTL,
-		"default_response":      s.cfg.Server.DefaultResponse,
-		"default_record":        s.cfg.Server.DefaultRecord,
-		"enable_geoip_mmap":     s.cfg.Server.EnableGeoIPMmap,
-		"geoip_update_url":      s.cfg.Server.GeoIPUpdateURL,
-		"geoip_update_interval": s.cfg.Server.GeoIPUpdateInterval,
+		"listen":           s.cfg.Server.Listen,
+		"default_ttl":      s.cfg.Server.DefaultTTL,
+		"default_response": s.cfg.Server.DefaultResponse,
+		"default_record":   s.cfg.Server.DefaultRecord,
+		"geoip": map[string]interface{}{
+			"enable_mmap":     s.cfg.Server.GeoIP.EnableMmap,
+			"update_url":      s.cfg.Server.GeoIP.UpdateURL,
+			"update_interval": s.cfg.Server.GeoIP.UpdateInterval,
+		},
+		"dashboard": map[string]interface{}{
+			"url":             s.dashboardURL(r),
+			"update_interval": s.cfg.Server.API.Dashboard.UpdateInterval,
+		},
 	})
+}
+
+func (s *Server) dashboardURL(r *http.Request) string {
+	if s.cfg.Server.API.Dashboard.URL == "" {
+		return ""
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); forwarded == "http" || forwarded == "https" {
+		scheme = forwarded
+	}
+	return scheme + "://" + r.Host + "/dashboard"
 }
 
 func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {

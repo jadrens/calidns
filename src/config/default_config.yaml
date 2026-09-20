@@ -4,12 +4,16 @@
 server:
   # Generated from active, non-loopback interfaces at first start.
   listen: []
-  enable_geoip_mmap: false      # false: heap index; true: file-backed mmap index
-  geoip_update_url: ""          # Direct URL to geoip.dat; empty disables updates
-  geoip_update_interval: "24h"  # Next update is based on geoip.dat mtime
+  geoip:
+    enable_mmap: false          # false: heap index; true: file-backed mmap index
+    update_url: "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat"
+    update_interval: "24h"      # Next update is based on geoip.dat mtime
   api:
     enabled: false
     listen: ":3101"
+    dashboard:
+      url: "default"              # Or an HTTP(S) ZIP containing a dist tree
+      update_interval: "24h"      # Used only for a remote ZIP
     tokens:
       - "changeme-please-replace-with-a-secure-token"
     # cors:

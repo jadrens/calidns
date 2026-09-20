@@ -102,8 +102,8 @@ func TestEnableGeoIPMmap(t *testing.T) {
 		want bool
 	}{
 		{"default", "server: {}\n", false},
-		{"enabled", "server:\n  enable_geoip_mmap: true\n", true},
-		{"disabled", "server:\n  enable_geoip_mmap: false\n", false},
+		{"enabled", "server:\n  geoip:\n    enable_mmap: true\n", true},
+		{"disabled", "server:\n  geoip:\n    enable_mmap: false\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
@@ -113,8 +113,8 @@ func TestEnableGeoIPMmap(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Server.EnableGeoIPMmap != tc.want {
-				t.Fatalf("enable_geoip_mmap = %v, want %v", cfg.Server.EnableGeoIPMmap, tc.want)
+			if cfg.Server.GeoIP.EnableMmap != tc.want {
+				t.Fatalf("geoip.enable_mmap = %v, want %v", cfg.Server.GeoIP.EnableMmap, tc.want)
 			}
 		})
 	}
@@ -155,11 +155,11 @@ func TestGeoIPUpdateConfiguration(t *testing.T) {
 		wantInterval string
 		wantError    bool
 	}{
-		{"default interval", "server:\n  geoip_update_url: https://example.com/geoip.dat\n", "24h", false},
-		{"custom interval", "server:\n  geoip_update_url: https://example.com/geoip.dat\n  geoip_update_interval: 12h\n", "12h", false},
-		{"invalid URL", "server:\n  geoip_update_url: file:///tmp/geoip.dat\n", "", true},
-		{"invalid interval", "server:\n  geoip_update_url: https://example.com/geoip.dat\n  geoip_update_interval: yesterday\n", "", true},
-		{"negative interval", "server:\n  geoip_update_url: https://example.com/geoip.dat\n  geoip_update_interval: -1h\n", "", true},
+		{"default interval", "server:\n  geoip:\n    update_url: https://example.com/geoip.dat\n", "24h", false},
+		{"custom interval", "server:\n  geoip:\n    update_url: https://example.com/geoip.dat\n    update_interval: 12h\n", "12h", false},
+		{"invalid URL", "server:\n  geoip:\n    update_url: file:///tmp/geoip.dat\n", "", true},
+		{"invalid interval", "server:\n  geoip:\n    update_url: https://example.com/geoip.dat\n    update_interval: yesterday\n", "", true},
+		{"negative interval", "server:\n  geoip:\n    update_url: https://example.com/geoip.dat\n    update_interval: -1h\n", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
@@ -169,8 +169,8 @@ func TestGeoIPUpdateConfiguration(t *testing.T) {
 			if (err != nil) != tc.wantError {
 				t.Fatalf("Load error = %v, wantError=%v", err, tc.wantError)
 			}
-			if err == nil && cfg.Server.GeoIPUpdateInterval != tc.wantInterval {
-				t.Fatalf("interval = %q, want %q", cfg.Server.GeoIPUpdateInterval, tc.wantInterval)
+			if err == nil && cfg.Server.GeoIP.UpdateInterval != tc.wantInterval {
+				t.Fatalf("interval = %q, want %q", cfg.Server.GeoIP.UpdateInterval, tc.wantInterval)
 			}
 		})
 	}

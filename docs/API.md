@@ -10,9 +10,9 @@ YAML 字段和完整配置示例见 [配置文档](CONFIG.md)。
 - **Content-Type**: `application/json`
 - **CORS**: 已启用（允许所有来源）
 
-GeoIP 索引模式由当前配置文件的 `server.enable_geoip_mmap` 控制，修改后需重启。`false` 使用常驻 Go 内存中的紧凑索引；`true` 使用文件映射的紧凑索引，并要求 `geoip.dat` 所在目录可写，以便启动时创建临时索引文件。
-自动更新由 `server.geoip_update_url` 和 `server.geoip_update_interval` 控制，更新时间按 `geoip.dat` 的 mtime 计算，详见 [配置文档](CONFIG.md)。
-`GET /api/server` 会显示当前配置值；`PUT /api/server` 不会热切换 GeoIP mmap 或自动更新设置。
+GeoIP 索引模式由当前配置文件的 `server.geoip.enable_mmap` 控制，修改后需重启。`false` 使用常驻 Go 内存中的紧凑索引；`true` 使用文件映射的紧凑索引，并要求 `geoip.dat` 所在目录可写，以便启动时创建临时索引文件。
+自动更新由 `server.geoip.update_url` 和 `server.geoip.update_interval` 控制，更新时间按 `geoip.dat` 的 mtime 计算，详见 [配置文档](CONFIG.md)。
+`GET /api/server` 会返回分组的 `geoip` 和 `dashboard` 对象；`dashboard.url` 在内置和远程 ZIP 模式下均为当前请求 host 加 `/dashboard`。`PUT /api/server` 不会热切换这些设置。
 
 ## 鉴权
 
@@ -86,9 +86,15 @@ server:
     "default_ttl": 300,
     "default_response": "refuse",
     "default_record": false,
-    "enable_geoip_mmap": false,
-    "geoip_update_url": "",
-    "geoip_update_interval": "24h"
+    "geoip": {
+        "enable_mmap": false,
+        "update_url": "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat",
+        "update_interval": "24h"
+    },
+    "dashboard": {
+        "url": "https://dns.example.com/dashboard",
+        "update_interval": "24h"
+    }
 }
 ```
 
@@ -99,9 +105,11 @@ server:
 | `default_ttl` | int | 默认 TTL（秒），当 zone 未指定 ttl 时使用 |
 | `default_response` | string | 未匹配 zone 时的默认响应：`refuse`、`nxdomain`、`servfail` |
 | `default_record` | bool | 是否默认记录查询日志 |
-| `enable_geoip_mmap` | bool | GeoIP 索引是否使用 mmap；只读，编辑 YAML 后重启 |
-| `geoip_update_url` | string | GeoIP 自动更新地址；只读，编辑 YAML 后重启 |
-| `geoip_update_interval` | string | 基于 `geoip.dat` mtime 的更新间隔；只读，编辑 YAML 后重启 |
+| `geoip.enable_mmap` | bool | GeoIP 索引是否使用 mmap；只读，编辑 YAML 后重启 |
+| `geoip.update_url` | string | GeoIP 自动更新地址；只读，编辑 YAML 后重启 |
+| `geoip.update_interval` | string | 基于 `geoip.dat` mtime 的更新间隔；只读，编辑 YAML 后重启 |
+| `dashboard.url` | string | 本机 `/dashboard` 访问地址；只读，编辑 YAML 后重启 |
+| `dashboard.update_interval` | string | 远程 Dashboard ZIP 更新间隔；只读，编辑 YAML 后重启 |
 
 **PUT** `/api/server`
 

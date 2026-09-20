@@ -6,8 +6,8 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/src/config"
-	"dns-server/src/resolver"
+	"calidns/src/config"
+	"calidns/src/resolver"
 )
 
 type captureWriter struct{ msg *dns.Msg }

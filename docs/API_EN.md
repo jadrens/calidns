@@ -6,7 +6,7 @@
 
 The API is disabled by default. Enable it with `server.api.enabled: true` in the active config file; its default listen address is `:3101`. Requests and responses use JSON. CORS is enabled and configurable in `server.api.cors`.
 
-All endpoints except `GET /api/health` require an `Authorization: Bearer <token>` header **when tokens are configured**. If `server.api.tokens` is empty, authentication is disabled; do not expose such an API publicly. `OPTIONS` preflight requests return `204` without authentication.
+All API endpoints except `GET /api/health` require an `Authorization: Bearer <token>` header **when tokens are configured**. The optional `/dashboard` static UI is public, while its API requests remain authenticated. If `server.api.tokens` is empty, authentication is disabled; do not expose such an API publicly. `OPTIONS` preflight requests return `204` without authentication.
 
 ```yaml
 server:
@@ -17,7 +17,7 @@ server:
       - "replace-with-a-long-random-token"
 ```
 
-GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API. `GET /api/server` shows them; edit YAML and restart to change them. See the [configuration guide](CONFIG_EN.md).
+GeoIP and dashboard source/update settings are set in YAML, not hot-switched by the API. `GET /api/server` shows them as grouped objects; edit YAML and restart to change them. See the [configuration guide](CONFIG_EN.md).
 
 ## Endpoints
 
@@ -54,7 +54,7 @@ GeoIP mmap and auto-update settings are set in YAML, not hot-switched by the API
 
 ### Server defaults
 
-`GET /api/server` returns the current `listen`, `default_ttl`, `default_response`, `default_record`, `enable_geoip_mmap`, `geoip_update_url`, and `geoip_update_interval` values.
+`GET /api/server` returns the current `listen`, `default_ttl`, `default_response`, and `default_record`, plus `geoip` and `dashboard` objects. `dashboard.url` is the request host plus `/dashboard` for either the embedded or remote-ZIP mode; `dashboard.update_interval` reports the configured remote refresh interval.
 
 `PUT /api/server` accepts any subset of these writable fields:
 

@@ -17,14 +17,14 @@ import (
 
 	"github.com/miekg/dns"
 
-	"dns-server/external_api"
-	"dns-server/src/api"
-	"dns-server/src/config"
-	"dns-server/src/dnsdata"
-	"dns-server/src/geo"
-	"dns-server/src/handler"
-	"dns-server/src/recorder"
-	"dns-server/src/resolver"
+	"calidns/external_api"
+	"calidns/src/api"
+	"calidns/src/config"
+	"calidns/src/dnsdata"
+	"calidns/src/geo"
+	"calidns/src/handler"
+	"calidns/src/recorder"
+	"calidns/src/resolver"
 )
 
 func newDNSServers(addresses []string) []*dns.Server {
@@ -38,18 +38,26 @@ func newDNSServers(addresses []string) []*dns.Server {
 	return servers
 }
 
-func main() {
+func parseFlags() (*string, *string) {
 	configPath := flag.String("config", "", "Path to YAML configuration file")
 	dataDir := flag.String("data-dir", "", "Directory for databases and GeoIP data")
 	flag.Parse()
+	return configPath, dataDir
+}
+
+func main() {
+
+	configPath, dataDir := parseFlags()
+
+	// Default config and data directory if not provided.
 	if *configPath == "" {
 		executable, err := os.Executable()
 		if err != nil {
-			log.Fatalf("Finding executable path: %v", err)
+			log.Fatalf("Failed to get executable path: %v", err)
 		}
 		workdir, err := os.Getwd()
 		if err != nil {
-			log.Fatalf("Finding current directory: %v", err)
+			log.Fatalf("Failed to get working directory: %v", err)
 		}
 		*configPath = defaultConfigPath(executable, workdir)
 	}
@@ -96,13 +104,13 @@ func main() {
 	log.Printf("Loaded %d zones from %s", len(cfg.Zones), dataPath)
 
 	// Initialize components.
-	updateInterval, _ := time.ParseDuration(cfg.Server.GeoIPUpdateInterval)
+	updateInterval, _ := time.ParseDuration(cfg.Server.GeoIP.UpdateInterval)
 	externalCfg, err := external_api.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load external API config: %v", err)
 	}
 	geoProvider := external_api.NewIP2Location(externalCfg.GeoIPAPIKey)
-	geoLookup, err := geo.NewLookuper(filepath.Join(*dataDir, "geo_cache.db"), 7*24*time.Hour, geoProvider, filepath.Join(*dataDir, "geoip.dat"), cfg.Server.EnableGeoIPMmap, cfg.Server.GeoIPUpdateURL, updateInterval)
+	geoLookup, err := geo.NewLookuper(filepath.Join(*dataDir, "geo_cache.db"), 7*24*time.Hour, geoProvider, filepath.Join(*dataDir, "geoip.dat"), cfg.Server.GeoIP.EnableMmap, cfg.Server.GeoIP.UpdateURL, updateInterval)
 	if err != nil {
 		log.Fatalf("Failed to initialize geo lookuper: %v", err)
 	}
@@ -137,8 +145,13 @@ func main() {
 
 	// HTTP API server.
 	var apiSrv *http.Server
+	var apiHandler *api.Server
 	if cfg.Server.API.Enabled {
-		apiHandler := api.NewServer(resolverIns, rec, geoLookup, cfg.Server.API.Tokens, cfg.Server.API.CORS, cfg, dnsStore)
+		apiHandler, err = api.NewServer(resolverIns, rec, geoLookup, cfg.Server.API.Tokens, cfg.Server.API.CORS, cfg, dnsStore)
+		if err != nil {
+			log.Fatalf("Failed to initialize API server: %v", err)
+		}
+		defer apiHandler.Close()
 		apiSrv = &http.Server{
 			Addr:    cfg.Server.API.Listen,
 			Handler: apiHandler,
@@ -201,6 +214,13 @@ func main() {
 	log.Println("Server stopped")
 }
 
+// `/etc` When executable under
+// `/usr/bin`
+// `/usr/sbin`
+// `/usr/local/bin`
+// `/usr/local/sbin`
+// `/bin`, `/sbin`
+// Otherwise, use working directory
 func defaultConfigPath(executable, workdir string) string {
 	switch filepath.Dir(executable) {
 	case "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin":
@@ -210,6 +230,10 @@ func defaultConfigPath(executable, workdir string) string {
 	}
 }
 
+/**
+ * Default data directory.
+ * /var/lib/calidns
+ */
 func defaultDataDir(configPath string) string {
 	if filepath.Clean(filepath.Dir(configPath)) == "/etc/calidns" {
 		return "/var/lib/calidns"

@@ -1,4 +1,4 @@
-module dns-server
+module calidns
 
 go 1.26.4
 

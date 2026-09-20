@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dns-server/src/config"
+	"calidns/src/config"
 )
 
 func TestStoreInitializesAndPersistsDNSData(t *testing.T) {

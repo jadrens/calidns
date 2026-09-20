@@ -133,7 +133,7 @@ EOF
 }
 
 build_dashboard() {
-  require bun tar zstd
+  require bun tar zstd zip
   [[ -f dashboard/package.json && -f dashboard/bun.lock ]] || {
     echo 'Dashboard submodule is missing. Run: git submodule update --init --recursive' >&2
     exit 1
@@ -142,25 +142,35 @@ build_dashboard() {
   (
     cd dashboard
     bun install --frozen-lockfile
-    bun run build
+    VITE_BASE_PATH=/dashboard/ bun run build -- --outDir ../internal/dashboard/dist --emptyOutDir
   )
+  [[ -f internal/dashboard/dist/index.html ]] || {
+    echo 'Dashboard build did not produce internal/dashboard/dist/index.html' >&2
+    exit 1
+  }
+
+  # Every server architecture embeds dashboard/dist. Only publish the separate,
+  # architecture-independent dashboard archive from the amd64 job.
+  [[ $arch == amd64 ]] || return 0
 
   local dashboard_stage="$work/dashboard-archive/calidns-dashboard"
   mkdir -p "$dashboard_stage"
-  cp -a dashboard/dist/. "$dashboard_stage/"
+  cp -a internal/dashboard/dist/. "$dashboard_stage/"
   install -m 0644 dashboard/README.md "$dashboard_stage/README.md"
   install -m 0644 dashboard/LICENSE "$dashboard_stage/LICENSE"
   tar -cf - -C "$work/dashboard-archive" calidns-dashboard | \
     zstd -q -f -T0 -19 -o "$dist/calidns-dashboard_${release}.tar.zst"
+  (
+    cd internal/dashboard/dist
+    zip -q -r "$dist/calidns-dashboard_${release}.zip" .
+  )
 }
 
-build_linux
+# Build before the Go binary so dashboard/dist is embedded. The separate static
+# archive is emitted only by the amd64 job.
+build_dashboard
 
-# The Vite output is architecture-independent. Build it once in the amd64
-# release job to avoid uploading the same asset from both matrix jobs.
-if [[ $arch == amd64 ]]; then
-  build_dashboard
-fi
+build_linux
 
 echo 'Release assets:'
 find "$dist" -maxdepth 1 -type f -name "calidns_${release}_*" -print

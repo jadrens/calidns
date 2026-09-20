@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"dns-server/src/config"
+	"calidns/src/config"
 )
 
 const (

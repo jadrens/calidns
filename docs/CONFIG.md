@@ -13,12 +13,16 @@ server:
   listen:
     - "192.0.2.42:53"
     - "[2001:db8::42]:53"
-  enable_geoip_mmap: false        # false: Go 内存索引；true: 文件映射索引
-  geoip_update_url: ""            # 直链 geoip.dat；空值关闭自动更新
-  geoip_update_interval: "24h"    # 以 geoip.dat 的 mtime 计算下次更新时间
+  geoip:
+    enable_mmap: false            # false: Go 内存索引；true: 文件映射索引
+    update_url: "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat"
+    update_interval: "24h"        # 以 geoip.dat 的 mtime 计算下次更新时间
   api:
     enabled: true
     listen: ":3101"
+    dashboard:
+      url: "default"              # 或包含 dist 目录结构的 HTTP(S) ZIP
+      update_interval: "24h"      # 仅远程 ZIP 使用
     tokens:
       - "replace-with-a-long-random-token"
     cors:
@@ -54,9 +58,9 @@ external_api:
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `listen` | 活动的非回环 IP 地址，端口 53 | IPv4/IPv6 UDP/TCP 地址列表；每个地址分别监听 UDP 和 TCP。生成时保存当前地址，网络地址变化后需手动更新。 |
-| `enable_geoip_mmap` | `false` | `false` 使用 Go 堆内紧凑索引；`true` 使用文件映射的紧凑索引。重启后生效。 |
-| `geoip_update_url` | 空 | GeoIP 数据文件的 HTTP(S) 直接下载地址；空值关闭自动更新。 |
-| `geoip_update_interval` | `24h`（配置了 URL 时） | 更新间隔，使用 Go duration 写法，如 `12h`、`48h`；必须大于 0。 |
+| `geoip.enable_mmap` | `false` | `false` 使用 Go 堆内紧凑索引；`true` 使用文件映射的紧凑索引。重启后生效。 |
+| `geoip.update_url` | jsDelivr 上的 v2fly GeoIP | GeoIP 数据文件的 HTTP(S) 直接下载地址；空值或未配置时使用默认上游。 |
+| `geoip.update_interval` | `24h` | 更新间隔，使用 Go duration 写法，如 `12h`、`48h`；必须大于 0。 |
 
 旧配置中的单个 `listen` 字符串需要改为列表；原 `listen_ipv6` 地址也应放入同一列表。仅在配置文件首次生成时检测本机地址，之后网络地址变化需手动更新。
 
@@ -64,9 +68,9 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 
 商业 API 代码位于 `external_api`，核心 `geo.Provider` 接口只接收 IP，并返回可空的 `CountryCode`、`SubLocation`、`ASN`、`ASNName`。内置 ip2location 实现默认由 `external_api.geo_ip_api_key` 配置；`none` 或空值关闭外部兜底。
 
-`enable_geoip_mmap: true` 时，启动过程会在 `geoip.dat` 所在目录创建临时紧凑索引文件，映射成功后删除其目录项；因此该目录必须可写。关闭 mmap 时，运行期间只保留计算用的紧凑索引，不会把原始 `geoip.dat` 常驻内存。
+`geoip.enable_mmap: true` 时，启动过程会在 `geoip.dat` 所在目录创建临时紧凑索引文件，映射成功后删除其目录项；因此该目录必须可写。关闭 mmap 时，运行期间只保留计算用的紧凑索引，不会把原始 `geoip.dat` 常驻内存。
 
-配置 `geoip_update_url` 后，下次更新时间 = **`geoip.dat` 的 mtime + `geoip_update_interval`**。启动时若文件不存在或已经到期，会立即尝试下载；未到期则等待剩余时间。下载内容必须是原始 `geoip.dat` 文件，不能是 ZIP、网页或 API JSON。服务先校验新文件并构建索引，成功后才替换磁盘文件和运行中的索引，无需重启；失败会保留旧文件/索引，并在 1 分钟至 1 小时后重试。成功更新会把文件 mtime 设为更新时间。由于 SQLite `/24` 缓存仍然优先，已有缓存条目在过期或删除前不会立即改用新数据。手工替换 `geoip.dat` 后仍需重启才能加载。
+下次更新时间 = **`geoip.dat` 的 mtime + `geoip.update_interval`**。启动时若文件不存在或已经到期，会立即尝试下载；未到期则等待剩余时间。下载内容必须是原始 `geoip.dat` 文件，不能是 ZIP、网页或 API JSON。服务先校验新文件并构建索引，成功后才替换磁盘文件和运行中的索引，无需重启；失败会保留旧文件/索引，并在 1 分钟至 1 小时后重试。成功更新会把文件 mtime 设为更新时间。由于 SQLite `/24` 缓存仍然优先，已有缓存条目在过期或删除前不会立即改用新数据。手工替换 `geoip.dat` 后仍需重启才能加载。
 
 建议使用可信的 HTTPS 地址。自动更新需要数据目录可写；更新期间会短暂同时保留旧索引与新索引，内存占用可能高于平时。
 
@@ -76,6 +80,8 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 | --- | --- | --- |
 | `enabled` | `false` | 是否启动 HTTP API。 |
 | `listen` | `:3101` | HTTP API 监听地址。 |
+| `dashboard.url` | `default` | 空值关闭路由；`default` 提供内置 UI；HTTP(S) URL 下载包含 `index.html` 及 dist 资源的 ZIP。启用后统一在 `/dashboard` 提供。 |
+| `dashboard.update_interval` | `24h` | 远程 Dashboard ZIP 的更新间隔；更新失败时保留上一个有效版本。 |
 | `tokens` | 空 | Bearer Token 列表。**空列表表示不鉴权**，生产环境必须设置。 |
 | `cors.allow_origins` | `["*"]` | 允许的来源；未设置时向所有来源开放。 |
 | `cors.allow_methods` | `GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH` | 允许的 HTTP 方法。 |
@@ -84,7 +90,7 @@ Geo 查询顺序为：已有的 IPv4 `/24` 内存缓存 → `geo_cache.db` SQLit
 | `cors.max_age` | `0` | CORS 预检缓存秒数。 |
 | `cors.allow_credentials` | `false` | 是否返回允许凭据的 CORS 响应头。 |
 
-接口路径、请求与响应示例见 [API 文档](API.md)。`GET /api/server` 可查看 GeoIP mmap 和自动更新配置；`PUT /api/server` 不会热切换这些设置，修改它们需编辑 YAML 并重启。
+接口路径、请求与响应示例见 [API 文档](API.md)。`GET /api/server` 返回分组的 `geoip` 和 `dashboard` 配置；Dashboard URL 由请求的 host 和 scheme 生成。`PUT /api/server` 不会热切换这些设置，修改它们需编辑 YAML 并重启。
 
 ## `database` 与 `cluster`
 

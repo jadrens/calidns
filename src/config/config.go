@@ -14,6 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const DefaultGeoIPUpdateURL = "https://cdn.jsdelivr.net/gh/v2fly/geoip@release/geoip.dat"
+
 // RecordSet holds DNS records for a single country entry.
 type RecordSet struct {
 	A     []string `yaml:"a,omitempty" json:"a,omitempty"`
@@ -40,10 +42,18 @@ type ZoneConfig struct {
 
 // APIConfig holds HTTP API server settings.
 type APIConfig struct {
-	Enabled bool       `yaml:"enabled"`
-	Listen  string     `yaml:"listen"`
-	Tokens  []string   `yaml:"tokens"`
-	CORS    CORSConfig `yaml:"cors"`
+	Enabled   bool            `yaml:"enabled"`
+	Listen    string          `yaml:"listen"`
+	Dashboard DashboardConfig `yaml:"dashboard"`
+	Tokens    []string        `yaml:"tokens"`
+	CORS      CORSConfig      `yaml:"cors"`
+}
+
+// DashboardConfig selects the bundled dashboard or a periodically refreshed
+// ZIP containing a production dist tree.
+type DashboardConfig struct {
+	URL            string `yaml:"url"`
+	UpdateInterval string `yaml:"update_interval"`
 }
 
 // CORSConfig holds Cross-Origin Resource Sharing settings for the API server.
@@ -58,14 +68,19 @@ type CORSConfig struct {
 
 // ServerConfig holds top-level server settings.
 type ServerConfig struct {
-	Listen              []string  `yaml:"listen"`
-	DefaultTTL          int       `yaml:"-" json:"default_ttl"`
-	DefaultRecord       bool      `yaml:"-" json:"default_record"`
-	DefaultResponse     string    `yaml:"-" json:"default_response"`
-	EnableGeoIPMmap     bool      `yaml:"enable_geoip_mmap"`
-	GeoIPUpdateURL      string    `yaml:"geoip_update_url"`
-	GeoIPUpdateInterval string    `yaml:"geoip_update_interval"`
-	API                 APIConfig `yaml:"api"`
+	Listen          []string    `yaml:"listen"`
+	DefaultTTL      int         `yaml:"-" json:"default_ttl"`
+	DefaultRecord   bool        `yaml:"-" json:"default_record"`
+	DefaultResponse string      `yaml:"-" json:"default_response"`
+	GeoIP           GeoIPConfig `yaml:"geoip"`
+	API             APIConfig   `yaml:"api"`
+}
+
+// GeoIPConfig controls the local index and its remote upstream.
+type GeoIPConfig struct {
+	EnableMmap     bool   `yaml:"enable_mmap"`
+	UpdateURL      string `yaml:"update_url"`
+	UpdateInterval string `yaml:"update_interval"`
 }
 
 // ClusterConfig holds cluster mode and peer addresses.
@@ -113,21 +128,38 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("finding default DNS listeners: %w", err)
 		}
 	}
-	if cfg.Server.GeoIPUpdateURL != "" {
-		u, err := url.Parse(cfg.Server.GeoIPUpdateURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, fmt.Errorf("geoip_update_url must be an absolute HTTP(S) URL")
-		}
-		if cfg.Server.GeoIPUpdateInterval == "" {
-			cfg.Server.GeoIPUpdateInterval = "24h"
-		}
-		interval, err := time.ParseDuration(cfg.Server.GeoIPUpdateInterval)
-		if err != nil || interval <= 0 {
-			return nil, fmt.Errorf("geoip_update_interval must be a positive duration")
-		}
+	geoIP := &cfg.Server.GeoIP
+	if geoIP.UpdateURL == "" {
+		geoIP.UpdateURL = DefaultGeoIPUpdateURL
+	}
+	u, err := url.Parse(geoIP.UpdateURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("geoip.update_url must be an absolute HTTP(S) URL")
+	}
+	if geoIP.UpdateInterval == "" {
+		geoIP.UpdateInterval = "24h"
+	}
+	interval, err := time.ParseDuration(geoIP.UpdateInterval)
+	if err != nil || interval <= 0 {
+		return nil, fmt.Errorf("geoip.update_interval must be a positive duration")
 	}
 	if cfg.Server.API.Listen == "" {
 		cfg.Server.API.Listen = ":3101"
+	}
+	dashboard := &cfg.Server.API.Dashboard
+	dashboard.URL = strings.TrimSpace(dashboard.URL)
+	if dashboard.URL != "" && dashboard.URL != "default" {
+		u, err := url.Parse(dashboard.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("dashboard.url must be default or an absolute HTTP(S) URL")
+		}
+		if dashboard.UpdateInterval == "" {
+			dashboard.UpdateInterval = "24h"
+		}
+		interval, err := time.ParseDuration(dashboard.UpdateInterval)
+		if err != nil || interval <= 0 {
+			return nil, fmt.Errorf("dashboard.update_interval must be a positive duration")
+		}
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Database.Type), "sqlite") && cfg.Database.SQLitePath == "" {
 		cfg.Database.SQLitePath = "queries.db"
