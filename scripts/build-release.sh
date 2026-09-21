@@ -37,6 +37,7 @@ build_linux() {
   local stage="$work/deb"
   install -D -m 0755 "$binary" "$stage/usr/bin/calidns"
   install -D -m 0644 scripts/calidns.service "$stage/lib/systemd/system/calidns.service"
+  install -D -m 0640 src/config/default_config.yaml "$stage/etc/calidns/config.yaml"
   install -D -m 0644 README.md "$stage/usr/share/doc/calidns/README.md"
   install -D -m 0644 LICENSE "$stage/usr/share/doc/calidns/copyright"
 
@@ -46,6 +47,7 @@ build_linux() {
     arm64) deb_arch=arm64; rpm_arch=aarch64 ;;
   esac
   mkdir -p "$stage/DEBIAN"
+  echo '/etc/calidns/config.yaml' > "$stage/DEBIAN/conffiles"
   cat > "$stage/DEBIAN/control" <<EOF
 Package: calidns
 Version: $release
@@ -61,6 +63,16 @@ EOF
   cat > "$stage/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
+if ! getent group calidns >/dev/null 2>&1; then
+  addgroup --system calidns >/dev/null 2>&1 || groupadd --system calidns
+fi
+if ! getent passwd calidns >/dev/null 2>&1; then
+  adduser --system --ingroup calidns --home /var/lib/calidns --no-create-home calidns >/dev/null 2>&1 || \
+    useradd --system --gid calidns --home-dir /var/lib/calidns --shell /usr/sbin/nologin calidns
+fi
+install -d -m 0750 -o calidns -g calidns /etc/calidns /var/lib/calidns
+chown calidns:calidns /etc/calidns/config.yaml
+chmod 0640 /etc/calidns/config.yaml
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi
@@ -94,10 +106,18 @@ Authoritative DNS server with GeoIP-aware responses and a management API.
 %install
 install -D -m 0755 $binary %{buildroot}/usr/bin/calidns
 install -D -m 0644 $root/scripts/calidns.service %{buildroot}/usr/lib/systemd/system/calidns.service
+install -D -m 0640 $root/src/config/default_config.yaml %{buildroot}/etc/calidns/config.yaml
 install -D -m 0644 $root/README.md %{buildroot}/usr/share/doc/calidns/README.md
 install -D -m 0644 $root/LICENSE %{buildroot}/usr/share/doc/calidns/LICENSE
 
+%pre
+getent group calidns >/dev/null 2>&1 || groupadd -r calidns
+getent passwd calidns >/dev/null 2>&1 || useradd -r -g calidns -d /var/lib/calidns -s /sbin/nologin calidns
+
 %post
+install -d -m 0750 -o calidns -g calidns /etc/calidns /var/lib/calidns
+chown calidns:calidns /etc/calidns/config.yaml
+chmod 0640 /etc/calidns/config.yaml
 systemctl daemon-reload >/dev/null 2>&1 || :
 
 %postun
@@ -106,6 +126,7 @@ systemctl daemon-reload >/dev/null 2>&1 || :
 %files
 /usr/bin/calidns
 /usr/lib/systemd/system/calidns.service
+%config(noreplace) /etc/calidns/config.yaml
 /usr/share/doc/calidns/README.md
 /usr/share/doc/calidns/LICENSE
 EOF

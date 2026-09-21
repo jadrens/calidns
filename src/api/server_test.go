@@ -154,3 +154,66 @@ func TestZoneAPIRejectsInvalidRecord(t *testing.T) {
 		t.Fatal("invalid record changed the resolver")
 	}
 }
+
+func TestZoneAPIRejectsInvalidTTLAndIP(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{DefaultTTL: 300}, Zones: map[string]*config.ZoneConfig{}}
+	server, err := NewServer(resolver.New(cfg), nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"pattern":"example.com","ttl":-1,"countries":{"default":{"a":["192.0.2.1"]}}}`,
+		`{"pattern":"example.com","countries":{"default":{"a":["not-an-ip"]}}}`,
+		`{"pattern":"example.com","countries":{"default":{"aaaa":["192.0.2.1"]}}}`,
+	} {
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/zones", bytes.NewBufferString(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d response=%s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestClusterConfigDoesNotExposeSecrets(t *testing.T) {
+	cfg := &config.Config{
+		Server:   config.ServerConfig{DefaultTTL: 300, API: config.APIConfig{Tokens: []string{"secret-token"}}},
+		Database: config.DBConfig{Password: "secret-password"},
+		Zones:    map[string]*config.ZoneConfig{},
+	}
+	server, err := NewServer(resolver.New(cfg), nil, nil, nil, config.CORSConfig{}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("secret-token")) || bytes.Contains(w.Body.Bytes(), []byte("secret-password")) {
+		t.Fatalf("config endpoint leaked a secret: %s", w.Body.String())
+	}
+}
+
+func TestCORSSelectsSingleAllowedOrigin(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{DefaultTTL: 300}, Zones: map[string]*config.ZoneConfig{}}
+	cors := config.CORSConfig{AllowOrigins: []string{"https://one.example", "https://two.example"}}
+	server, err := NewServer(resolver.New(cfg), nil, nil, nil, cors, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Header.Set("Origin", "https://two.example")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://two.example" {
+		t.Fatalf("allow origin = %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	w = httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("disallowed origin was reflected: %q", got)
+	}
+}

@@ -1,14 +1,75 @@
 package geo
 
 import (
+	"context"
 	"encoding/binary"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
 )
+
+type countingProvider struct {
+	calls atomic.Int64
+	delay time.Duration
+}
+
+func (p *countingProvider) Lookup(context.Context, string) (ProviderResult, error) {
+	p.calls.Add(1)
+	time.Sleep(p.delay)
+	cc := "JP"
+	return ProviderResult{CountryCode: &cc}, nil
+}
+
+func TestLookupUsesConfiguredTTL(t *testing.T) {
+	p := new(countingProvider)
+	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Millisecond, p, "", false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if _, _, _, _, _, err := l.Lookup("203.0.113.1"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, _, _, _, _, err := l.Lookup("203.0.113.2"); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls.Load() != 2 {
+		t.Fatalf("provider calls = %d, want 2 after cache expiry", p.calls.Load())
+	}
+}
+
+func TestLookupCachesIPv6AndCoalescesMisses(t *testing.T) {
+	p := &countingProvider{delay: 50 * time.Millisecond}
+	l, err := NewLookuper(filepath.Join(t.TempDir(), "cache.db"), time.Hour, p, "", false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, _, _, _, err := l.Lookup("2001:db8::1"); err != nil {
+				t.Errorf("lookup: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if p.calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want one coalesced lookup", p.calls.Load())
+	}
+	if _, _, _, _, cached, err := l.Lookup("2001:db8::1"); err != nil || !cached {
+		t.Fatalf("IPv6 cache lookup: cached=%v err=%v", cached, err)
+	}
+}
 
 func protoVarint(field int, value uint64) []byte {
 	var buf [binary.MaxVarintLen64]byte

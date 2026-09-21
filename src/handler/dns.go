@@ -36,8 +36,11 @@ func New(cfg *config.Config, resolverIns *resolver.Resolver, geoLookup *geo.Look
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
-	m.Authoritative = true
+	m.Authoritative = false
 	m.RecursionAvailable = false
+	if opt := r.IsEdns0(); opt != nil {
+		m.SetEdns0(opt.UDPSize(), opt.Do())
+	}
 
 	// Default rcode — overridden on successful resolution.
 	m.SetRcode(r, h.defaultRcode())
@@ -48,9 +51,17 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	q := r.Question[0]
+	if q.Qclass != dns.ClassINET {
+		m.SetRcode(r, dns.RcodeNotImplemented)
+		_ = w.WriteMsg(m)
+		return
+	}
 	domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 	qtype := q.Qtype
 	qtypeStr := dns.TypeToString[qtype]
+	if qtypeStr == "" {
+		qtypeStr = fmt.Sprintf("TYPE%d", qtype)
+	}
 
 	// Extract client IP and EDNS info early.
 	clientIP := extractIP(w.RemoteAddr())
@@ -63,15 +74,13 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// Determine whether geo lookup is necessary:
 	// - Zone matched but not fast_open → geo needed for correct records.
-	// - Zone matched and recording on → geo needed for log.
-	// - No zone matched but default recording on → geo needed for log.
+	// Recording-only lookups are intentionally deferred to the recorder so a
+	// slow external GeoIP service cannot delay authoritative DNS responses.
 	needGeo := false
 	needReresolve := false
 	if answer != nil {
-		needGeo = !answer.FastOpen || answer.Record
+		needGeo = !answer.FastOpen
 		needReresolve = !answer.FastOpen
-	} else if h.cfg.Server.DefaultRecord && h.recorder != nil {
-		needGeo = true
 	}
 
 	var countryCode, city, asn, asName string
@@ -79,7 +88,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	var ednsCountry, ednsCity, ednsASN, ednsASName string
 	var ednsGeoFailed bool
 
-	if needGeo {
+	if needGeo && h.geo != nil {
 		var geoErr error
 		countryCode, city, asn, asName, cached, geoErr = h.geo.Lookup(clientIP)
 		geoFailed = geoErr != nil
@@ -103,8 +112,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if needReresolve {
 			answer = h.resolver.Resolve(domain, qtype, countryCode)
 		}
-	} else {
-		// Fast_open without recording — geo completely skipped, mark as failed for retry.
+	} else if (answer != nil && answer.Record) || (answer == nil && h.cfg.Server.DefaultRecord) {
+		// The recorder enriches this entry asynchronously after it has been
+		// persisted. This also covers installations without a GeoIP provider.
 		geoFailed = true
 	}
 
@@ -133,6 +143,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(m)
 		return
 	}
+	m.Authoritative = true
 
 	// Record if enabled.
 	if answer.Record && h.recorder != nil {
@@ -166,9 +177,13 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if len(answer.Records) == 0 {
-		// Zone matched but no records for this qtype — NODATA.
 		m.SetRcode(r, dns.RcodeSuccess)
-		m.Ns = []dns.RR{soaRecord(domain, answer.TTL)}
+		if qtype == dns.TypeSOA {
+			m.Answer = []dns.RR{soaRecord(domain, answer.TTL)}
+		} else {
+			// Zone matched but no records for this qtype — NODATA.
+			m.Ns = []dns.RR{soaRecord(domain, answer.TTL)}
+		}
 	} else {
 		m.SetRcode(r, dns.RcodeSuccess)
 		m.Answer = answer.Records
@@ -230,19 +245,13 @@ func extractNSID(r *dns.Msg) string {
 	return ""
 }
 
-// subnetFirstIP returns the first usable IP address of a CIDR subnet.
-// For "1.2.3.0/24" it returns "1.2.3.1". Returns empty string on parse error.
+// subnetFirstIP returns the masked network address of an IPv4 or IPv6 subnet.
 func subnetFirstIP(cidr string) string {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return ""
 	}
-	ip4 := ipNet.IP.To4()
-	if ip4 == nil {
-		return ""
-	}
-	ip4[3] = 1
-	return ip4.String()
+	return ipNet.IP.String()
 }
 
 // soaRecord builds a minimal SOA record for NODATA responses.

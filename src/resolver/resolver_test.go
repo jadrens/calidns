@@ -73,6 +73,17 @@ func TestValidateRecordSet(t *testing.T) {
 	if err := ValidateRecordSet(RecordSet{Other: []string{"NOTATYPE data"}}); err == nil {
 		t.Fatal("invalid generic record accepted")
 	}
+	for _, rs := range []RecordSet{
+		{A: []string{"not-an-ip"}},
+		{A: []string{"2001:db8::1"}},
+		{AAAA: []string{"192.0.2.1"}},
+		{CNAME: []string{"bad name"}},
+		{CNAME: []string{"target.example"}, A: []string{"192.0.2.1"}},
+	} {
+		if err := ValidateRecordSet(rs); err == nil {
+			t.Fatalf("invalid record set accepted: %+v", rs)
+		}
+	}
 }
 
 func TestZoneMatchingModes(t *testing.T) {

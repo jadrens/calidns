@@ -108,6 +108,20 @@ type Config struct {
 	Zones    map[string]*ZoneConfig `yaml:"-" json:"zones"`
 }
 
+// SyncConfig is the non-secret subset shared from a master to its slaves.
+// Listener, database, API credentials, CORS and external-provider settings are
+// intentionally local to each node.
+type SyncConfig struct {
+	Server SyncServerConfig       `json:"server"`
+	Zones  map[string]*ZoneConfig `json:"zones"`
+}
+
+type SyncServerConfig struct {
+	DefaultTTL      int    `json:"default_ttl"`
+	DefaultRecord   bool   `json:"default_record"`
+	DefaultResponse string `json:"default_response"`
+}
+
 // Load reads and parses a YAML config file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -298,9 +312,11 @@ func (c *CORSConfig) HeaderValues() (origin, methods, headers, expose string, ma
 
 // DSN returns the PostgreSQL connection string.
 func (db *DBConfig) DSN() string {
-	host, port := db.Host, "5432"
-	if h, p, ok := strings.Cut(host, ":"); ok {
+	host, port := strings.TrimSpace(db.Host), "5432"
+	if h, p, err := net.SplitHostPort(host); err == nil {
 		host, port = h, p
+	} else if net.ParseIP(host) == nil && strings.Count(host, ":") == 1 {
+		host, port, _ = strings.Cut(host, ":")
 	}
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, db.User, db.Password, db.DBName)

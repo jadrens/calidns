@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"calidns/internal/dashboard"
@@ -21,14 +22,15 @@ import (
 
 // Server handles HTTP API requests.
 type Server struct {
-	resolver  *resolver.Resolver
-	recorder  *recorder.Recorder
-	geoLookup *geo.Lookuper
-	mux       *http.ServeMux
-	tokens    map[string]struct{} // set of valid bearer tokens
-	cfg       *config.Config      // server config (for persisting zone changes)
-	dnsStore  *dnsdata.Store      // Web-API-managed DNS data
-	dashboard *dashboard.Handler  // built-in or downloaded dashboard assets
+	resolver   *resolver.Resolver
+	recorder   *recorder.Recorder
+	geoLookup  *geo.Lookuper
+	mux        *http.ServeMux
+	tokens     map[string]struct{} // set of valid bearer tokens
+	cfg        *config.Config      // server config (for persisting zone changes)
+	dnsStore   *dnsdata.Store      // Web-API-managed DNS data
+	dashboard  *dashboard.Handler  // built-in or downloaded dashboard assets
+	httpClient *http.Client
 
 	// Cluster sync.
 	clusterMode string   // "master", "slave", or empty
@@ -38,6 +40,7 @@ type Server struct {
 
 	// Precomputed CORS header values.
 	corsOrigin      string
+	corsOrigins     []string
 	corsMethods     string
 	corsHeaders     string
 	corsExpose      string
@@ -77,11 +80,13 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 		cfg:             cfg,
 		dnsStore:        dnsStore,
 		dashboard:       dashboardHandler,
+		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		clusterMode:     cfg.Cluster.Mode,
 		slaves:          cfg.Cluster.Slaves,
 		masterURL:       cfg.Cluster.Master,
 		firstToken:      cfg.Server.API.FirstToken(),
 		corsOrigin:      origin,
+		corsOrigins:     append([]string(nil), corsCfg.AllowOrigins...),
 		corsMethods:     methods,
 		corsHeaders:     headers,
 		corsExpose:      expose,
@@ -94,7 +99,7 @@ func NewServer(res *resolver.Resolver, rec *recorder.Recorder, geoLookup *geo.Lo
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.setCORSHeaders(w)
+	s.setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -271,6 +276,10 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "pattern is required")
 		return
 	}
+	if req.TTL != nil && (*req.TTL <= 0 || uint64(*req.TTL) > uint64(^uint32(0))) {
+		writeError(w, http.StatusBadRequest, "ttl must be between 1 and 4294967295")
+		return
+	}
 
 	ze := resolver.ZoneEntry{
 		Pattern:   req.Pattern,
@@ -282,21 +291,31 @@ func (s *Server) upsertZone(w http.ResponseWriter, r *http.Request) {
 		FastOpen:  req.FastOpen,
 	}
 
+	previous := s.resolver.GetZone(req.Pattern)
 	if !s.resolver.UpsertZone(req.Pattern, ze) {
 		writeError(w, http.StatusBadRequest, "invalid zone mode or pattern")
 		return
 	}
 
 	log.Printf("[API] zone upserted: %s", req.Pattern)
-	s.persistDNSData()
+	if err := s.persistDNSData(); err != nil {
+		s.restoreZone(req.Pattern, previous)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.forwardToSlaves(r.Method, r.URL.RequestURI(), bodyBytes)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "pattern": req.Pattern})
 }
 
 func (s *Server) deleteZone(w http.ResponseWriter, r *http.Request, pattern string) {
+	previous := s.resolver.GetZone(pattern)
 	if s.resolver.RemoveZone(pattern) {
 		log.Printf("[API] zone deleted: %s", pattern)
-		s.persistDNSData()
+		if err := s.persistDNSData(); err != nil {
+			s.restoreZone(pattern, previous)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		s.forwardToSlaves(r.Method, r.URL.RequestURI(), nil)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "pattern": pattern})
 	} else {
@@ -305,9 +324,14 @@ func (s *Server) deleteZone(w http.ResponseWriter, r *http.Request, pattern stri
 }
 
 func (s *Server) deleteCountry(w http.ResponseWriter, r *http.Request, pattern, country string) {
+	previous := s.resolver.GetZone(pattern)
 	if s.resolver.RemoveCountry(pattern, country) {
 		log.Printf("[API] country %q removed from zone %s", country, pattern)
-		s.persistDNSData()
+		if err := s.persistDNSData(); err != nil {
+			s.restoreZone(pattern, previous)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		s.forwardToSlaves(r.Method, r.URL.RequestURI(), nil)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "pattern": pattern, "country": country})
 	} else {
@@ -399,7 +423,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.recorder != nil {
-		stats := s.recorder.GetStats()
+		stats, err := s.recorder.GetStats()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "recorder statistics unavailable")
+			return
+		}
 		resp["recorder"] = stats
 	} else {
 		resp["recorder"] = map[string]interface{}{"enabled": false}
@@ -411,6 +439,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // --- Health ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.recorder != nil {
+		if err := s.recorder.Ping(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "error": "recorder database unavailable"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -611,10 +645,13 @@ func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	changed := false
+	oldTTL := s.cfg.Server.DefaultTTL
+	oldResponse := s.cfg.Server.DefaultResponse
+	oldRecord := s.cfg.Server.DefaultRecord
 
 	if req.DefaultTTL != nil {
-		if *req.DefaultTTL <= 0 {
-			writeError(w, http.StatusBadRequest, "default_ttl must be positive")
+		if *req.DefaultTTL <= 0 || uint64(*req.DefaultTTL) > uint64(^uint32(0)) {
+			writeError(w, http.StatusBadRequest, "default_ttl must be between 1 and 4294967295")
 			return
 		}
 		s.cfg.Server.DefaultTTL = *req.DefaultTTL
@@ -644,7 +681,14 @@ func (s *Server) updateServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Hot-reload resolver defaults (TTL and record are cached there).
 	s.resolver.UpdateDefaults(uint32(s.cfg.Server.DefaultTTL), s.cfg.Server.DefaultRecord)
 
-	s.persistDNSData()
+	if err := s.persistDNSData(); err != nil {
+		s.cfg.Server.DefaultTTL = oldTTL
+		s.cfg.Server.DefaultResponse = oldResponse
+		s.cfg.Server.DefaultRecord = oldRecord
+		s.resolver.UpdateDefaults(uint32(oldTTL), oldRecord)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.forwardToSlaves(r.Method, r.URL.RequestURI(), bodyBytes)
 
 	log.Printf("[API] server config updated: ttl=%d response=%s record=%v",
@@ -660,7 +704,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.cfg)
+	writeJSON(w, http.StatusOK, config.SyncConfig{
+		Server: config.SyncServerConfig{
+			DefaultTTL:      s.cfg.Server.DefaultTTL,
+			DefaultRecord:   s.cfg.Server.DefaultRecord,
+			DefaultResponse: s.cfg.Server.DefaultResponse,
+		},
+		Zones: s.resolver.DumpZones(),
+	})
 }
 
 // --- Cluster forwarding ---
@@ -673,41 +724,72 @@ func (s *Server) forwardToSlaves(method, path string, body []byte) {
 
 	log.Printf("[cluster] forwarding %s %s to %d slave(s): %v", method, path, len(s.slaves), s.slaves)
 
+	var wg sync.WaitGroup
 	for _, slave := range s.slaves {
-		url := "https://" + slave + path
-		var req *http.Request
-		var err error
-		if body != nil {
-			req, err = http.NewRequest(method, url, bytes.NewReader(body))
-		} else {
-			req, err = http.NewRequest(method, url, nil)
-		}
-		if err != nil {
-			log.Printf("[cluster] failed to create request for %s: %v", slave, err)
-			continue
-		}
-		req.Header.Set("Authorization", "Bearer "+s.firstToken)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Cluster-Forward", "master")
+		slave := slave
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			url := "https://" + slave + path
+			var req *http.Request
+			var err error
+			if body != nil {
+				req, err = http.NewRequest(method, url, bytes.NewReader(body))
+			} else {
+				req, err = http.NewRequest(method, url, nil)
+			}
+			if err != nil {
+				log.Printf("[cluster] failed to create request for %s: %v", slave, err)
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+s.firstToken)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Cluster-Forward", "master")
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("[cluster] failed to forward to %s: %v", slave, err)
-			continue
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			log.Printf("[cluster] slave %s returned %d for %s %s", slave, resp.StatusCode, method, path)
-		} else {
-			log.Printf("[cluster] forwarded to %s OK (%s %s)", slave, method, path)
-		}
+			resp, err := s.httpClient.Do(req)
+			if err != nil {
+				log.Printf("[cluster] failed to forward to %s: %v", slave, err)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode >= 300 {
+				log.Printf("[cluster] slave %s returned %d for %s %s", slave, resp.StatusCode, method, path)
+			} else {
+				log.Printf("[cluster] forwarded to %s OK (%s %s)", slave, method, path)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // --- CORS ---
 
-func (s *Server) setCORSHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", s.corsOrigin)
+func (s *Server) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	allowedOrigin := ""
+	for _, candidate := range s.corsOrigins {
+		if candidate == "*" {
+			if s.corsCredentials && origin != "" {
+				allowedOrigin = origin
+			} else {
+				allowedOrigin = "*"
+			}
+			break
+		}
+		if origin != "" && candidate == origin {
+			allowedOrigin = origin
+			break
+		}
+	}
+	if allowedOrigin == "" && len(s.corsOrigins) <= 1 {
+		allowedOrigin = s.corsOrigin
+	}
+	if allowedOrigin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		if allowedOrigin != "*" {
+			w.Header().Add("Vary", "Origin")
+		}
+	}
 	w.Header().Set("Access-Control-Allow-Methods", s.corsMethods)
 	w.Header().Set("Access-Control-Allow-Headers", s.corsHeaders)
 	if s.corsExpose != "" {
@@ -723,20 +805,27 @@ func (s *Server) setCORSHeaders(w http.ResponseWriter) {
 
 // --- DNS data persistence ---
 
-func (s *Server) persistDNSData() {
+func (s *Server) persistDNSData() error {
 	s.cfg.Zones = s.resolver.DumpZones()
 	if s.dnsStore == nil {
-		return
+		return nil
 	}
-	if err := s.dnsStore.SaveDefaults(dnsdata.Defaults{
+	if err := s.dnsStore.SaveSnapshot(dnsdata.Defaults{
 		TTL: s.cfg.Server.DefaultTTL, Record: s.cfg.Server.DefaultRecord,
 		Response: s.cfg.Server.DefaultResponse,
-	}); err != nil {
-		log.Printf("[API] failed to save DNS defaults: %v", err)
+	}, s.cfg.Zones); err != nil {
+		return fmt.Errorf("saving DNS data: %w", err)
 	}
-	if err := s.dnsStore.ReplaceZones(s.cfg.Zones); err != nil {
-		log.Printf("[API] failed to save DNS zones: %v", err)
+	return nil
+}
+
+func (s *Server) restoreZone(pattern string, previous *resolver.ZoneEntry) {
+	if previous == nil {
+		s.resolver.RemoveZone(pattern)
+	} else {
+		s.resolver.UpsertZone(pattern, *previous)
 	}
+	s.cfg.Zones = s.resolver.DumpZones()
 }
 
 // --- Helpers ---

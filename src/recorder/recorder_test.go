@@ -28,7 +28,7 @@ func TestSQLiteRecorder(t *testing.T) {
 	}
 	r.insertOne(first)
 	r.insertOne(second)
-	if got := r.GetStats(); got.TotalQueries != 2 || got.CacheHited != 1 || got.Dropped != 0 {
+	if got, err := r.GetStats(); err != nil || got.TotalQueries != 2 || got.CacheHited != 1 || got.Dropped != 0 {
 		t.Fatalf("stats = %+v", got)
 	}
 
@@ -59,7 +59,7 @@ func TestSQLiteRecorder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if got := r.GetStats(); got.TotalQueries != 2 {
+	if got, err := r.GetStats(); err != nil || got.TotalQueries != 2 {
 		t.Fatalf("persisted stats = %+v", got)
 	}
 
@@ -75,7 +75,7 @@ func TestSQLiteRecorder(t *testing.T) {
 	if err != nil || deleted != 1 {
 		t.Fatalf("delete before = %d, %v", deleted, err)
 	}
-	if got := r.GetStats(); got.TotalQueries != 0 {
+	if got, err := r.GetStats(); err != nil || got.TotalQueries != 0 {
 		t.Fatalf("final stats = %+v", got)
 	}
 }
@@ -99,5 +99,14 @@ func TestSQLiteDeleteQueriesRemovesEDNS(t *testing.T) {
 	var remaining int
 	if err := r.db.QueryRow("SELECT COUNT(*) FROM edns").Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("remaining edns = %d, %v", remaining, err)
+	}
+}
+
+func TestEnqueueCountsFullQueueDrops(t *testing.T) {
+	r := &Recorder{ch: make(chan *Entry, 1)}
+	r.Enqueue(&Entry{})
+	r.Enqueue(&Entry{})
+	if got := r.dropped; got != 1 {
+		t.Fatalf("dropped = %d, want 1", got)
 	}
 }

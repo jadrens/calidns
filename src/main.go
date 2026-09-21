@@ -46,18 +46,23 @@ func parseFlags() (*string, *string) {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	configPath, dataDir := parseFlags()
 
 	// Default config and data directory if not provided.
 	if *configPath == "" {
 		executable, err := os.Executable()
 		if err != nil {
-			log.Fatalf("Failed to get executable path: %v", err)
+			return fmt.Errorf("getting executable path: %w", err)
 		}
 		workdir, err := os.Getwd()
 		if err != nil {
-			log.Fatalf("Failed to get working directory: %v", err)
+			return fmt.Errorf("getting working directory: %w", err)
 		}
 		*configPath = defaultConfigPath(executable, workdir)
 	}
@@ -68,10 +73,10 @@ func main() {
 	// Generate default config if missing.
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(*configPath), 0755); err != nil {
-			log.Fatalf("Failed to create config directory: %v", err)
+			return fmt.Errorf("creating config directory: %w", err)
 		}
 		if err := config.GenerateDefault(*configPath); err != nil {
-			log.Fatalf("Failed to generate default config: %v", err)
+			return fmt.Errorf("generating default config: %w", err)
 		}
 		log.Printf("Generated default config: %s", *configPath)
 	}
@@ -79,27 +84,27 @@ func main() {
 	// Load configuration.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		return fmt.Errorf("loading config: %w", err)
 	}
 	if err := os.MkdirAll(*dataDir, 0750); err != nil {
-		log.Fatalf("Failed to create data directory: %v", err)
+		return fmt.Errorf("creating data directory: %w", err)
 	}
 	dataPath := filepath.Join(*dataDir, "dns_data.db")
 	dnsStore, err := dnsdata.Open(dataPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize DNS data: %v", err)
+		return fmt.Errorf("initializing DNS data: %w", err)
 	}
 	defer dnsStore.Close()
 	defaults, err := dnsStore.LoadDefaults()
 	if err != nil {
-		log.Fatalf("Failed to load DNS defaults: %v", err)
+		return fmt.Errorf("loading DNS defaults: %w", err)
 	}
 	cfg.Server.DefaultTTL = defaults.TTL
 	cfg.Server.DefaultRecord = defaults.Record
 	cfg.Server.DefaultResponse = defaults.Response
 	cfg.Zones, err = dnsStore.LoadZones()
 	if err != nil {
-		log.Fatalf("Failed to load DNS zones: %v", err)
+		return fmt.Errorf("loading DNS zones: %w", err)
 	}
 	log.Printf("Loaded %d zones from %s", len(cfg.Zones), dataPath)
 
@@ -107,12 +112,12 @@ func main() {
 	updateInterval, _ := time.ParseDuration(cfg.Server.GeoIP.UpdateInterval)
 	externalCfg, err := external_api.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load external API config: %v", err)
+		return fmt.Errorf("loading external API config: %w", err)
 	}
 	geoProvider := external_api.NewIP2Location(externalCfg.GeoIPAPIKey)
 	geoLookup, err := geo.NewLookuper(filepath.Join(*dataDir, "geo_cache.db"), 7*24*time.Hour, geoProvider, filepath.Join(*dataDir, "geoip.dat"), cfg.Server.GeoIP.EnableMmap, cfg.Server.GeoIP.UpdateURL, updateInterval)
 	if err != nil {
-		log.Fatalf("Failed to initialize geo lookuper: %v", err)
+		return fmt.Errorf("initializing geo lookuper: %w", err)
 	}
 	defer geoLookup.Close()
 
@@ -127,7 +132,7 @@ func main() {
 	}
 	rec, err := recorder.New(recorderType, recorderSource, geoLookup)
 	if err != nil {
-		log.Fatalf("Failed to initialize recorder: %v", err)
+		return fmt.Errorf("initializing recorder: %w", err)
 	}
 	defer rec.Close()
 	if recorderType == "sqlite" {
@@ -149,7 +154,7 @@ func main() {
 	if cfg.Server.API.Enabled {
 		apiHandler, err = api.NewServer(resolverIns, rec, geoLookup, cfg.Server.API.Tokens, cfg.Server.API.CORS, cfg, dnsStore)
 		if err != nil {
-			log.Fatalf("Failed to initialize API server: %v", err)
+			return fmt.Errorf("initializing API server: %w", err)
 		}
 		defer apiHandler.Close()
 		apiSrv = &http.Server{
@@ -168,21 +173,15 @@ func main() {
 	// Graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	serveErr := make(chan error, len(dnsServers)+1)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
 		sig := <-sigCh
 		log.Printf("Received signal %v, shutting down...", sig)
 		cancel()
-		for _, server := range dnsServers {
-			_ = server.Shutdown()
-		}
-		if apiSrv != nil {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			_ = apiSrv.Shutdown(shutdownCtx)
-		}
 	}()
 
 	// Start HTTP API server.
@@ -190,7 +189,7 @@ func main() {
 		go func() {
 			log.Printf("API server listening on %s", cfg.Server.API.Listen)
 			if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("API server error: %v", err)
+				serveErr <- fmt.Errorf("API server %s: %w", cfg.Server.API.Listen, err)
 			}
 		}()
 	}
@@ -204,14 +203,29 @@ func main() {
 		server := server
 		go func() {
 			if err := server.ListenAndServe(); err != nil {
-				log.Printf("DNS server error (%s %s): %v", server.Net, server.Addr, err)
+				serveErr <- fmt.Errorf("DNS server %s %s: %w", server.Net, server.Addr, err)
 			}
 		}()
 	}
 
-	// Wait for shutdown to complete.
-	<-ctx.Done()
+	// A listener failure is fatal: keeping the process alive would make systemd
+	// report a healthy service that is not actually serving DNS or the API.
+	var listenerErr error
+	select {
+	case <-ctx.Done():
+	case listenerErr = <-serveErr:
+		cancel()
+	}
+	for _, server := range dnsServers {
+		_ = server.Shutdown()
+	}
+	if apiSrv != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = apiSrv.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 	log.Println("Server stopped")
+	return listenerErr
 }
 
 // `/etc` When executable under
@@ -255,67 +269,39 @@ func syncFromMaster(cfg *config.Config, res *resolver.Resolver, store *dnsdata.S
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetching config: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("master returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	var masterCfg config.Config
-	if err := json.NewDecoder(resp.Body).Decode(&masterCfg); err != nil {
+	var masterCfg config.SyncConfig
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&masterCfg); err != nil {
 		return fmt.Errorf("parsing config: %w", err)
 	}
 
 	log.Printf("[cluster] slave: received %d zones from master", len(masterCfg.Zones))
 
-	// Apply zones to the resolver.
-	for pattern, zc := range masterCfg.Zones {
-		countries := make(map[string]resolver.RecordSet, len(zc.Countries))
-		for cc, rs := range zc.Countries {
-			countries[cc] = resolver.RecordSet{
-				A:     rs.A,
-				AAAA:  rs.AAAA,
-				TXT:   rs.TXT,
-				CNAME: rs.CNAME,
-				MX:    rs.MX,
-				NS:    rs.NS,
-				SRV:   rs.SRV,
-				CAA:   rs.CAA,
-				PTR:   rs.PTR,
-				SOA:   rs.SOA,
-				Other: rs.Other,
-			}
-		}
-		ze := resolver.ZoneEntry{
-			Pattern:   pattern,
-			Regex:     pattern,
-			Mode:      zc.Mode,
-			Countries: countries,
-			TTL:       zc.TTL,
-			Record:    zc.Record,
-			FastOpen:  zc.FastOpen,
-		}
-		res.UpsertZone(pattern, ze)
+	// Replace the complete set so deletions made while a slave was offline are
+	// reconciled on its next startup.
+	if err := res.ReplaceZones(masterCfg.Zones); err != nil {
+		return fmt.Errorf("applying zones: %w", err)
 	}
 
 	// Sync only business-level server settings; preserve local listener/cluster/database settings.
 	cfg.Server.DefaultTTL = masterCfg.Server.DefaultTTL
 	cfg.Server.DefaultRecord = masterCfg.Server.DefaultRecord
 	cfg.Server.DefaultResponse = masterCfg.Server.DefaultResponse
-	// Sync API tokens and CORS; keep local Listen address and enabled flag.
-	cfg.Server.API.Tokens = masterCfg.Server.API.Tokens
-	cfg.Server.API.CORS = masterCfg.Server.API.CORS
+	res.UpdateDefaults(uint32(cfg.Server.DefaultTTL), cfg.Server.DefaultRecord)
 	cfg.Zones = res.DumpZones()
 
-	if err := store.SaveDefaults(dnsdata.Defaults{TTL: cfg.Server.DefaultTTL, Record: cfg.Server.DefaultRecord, Response: cfg.Server.DefaultResponse}); err != nil {
-		return err
-	}
-	if err := store.ReplaceZones(cfg.Zones); err != nil {
+	if err := store.SaveSnapshot(dnsdata.Defaults{TTL: cfg.Server.DefaultTTL, Record: cfg.Server.DefaultRecord, Response: cfg.Server.DefaultResponse}, cfg.Zones); err != nil {
 		return err
 	}
 	log.Printf("[cluster] slave: DNS data synced")

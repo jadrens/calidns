@@ -34,11 +34,20 @@ type CacheEntry struct {
 	ExpiresAt   string `json:"expires_at"` // RFC3339
 }
 
+type providerFlight struct {
+	done   chan struct{}
+	result ProviderResult
+	err    error
+}
+
 // Lookuper checks the in-memory and SQLite /24 cache before the local
 // geoip.dat index, then uses the API only when the local index misses.
 type Lookuper struct {
 	mu             sync.RWMutex
 	cache          map[uint32]*cacheEntry // key: subnet24 (first 24 bits of IPv4)
+	v6Cache        map[string]*cacheEntry
+	flightMu       sync.Mutex
+	flights        map[string]*providerFlight
 	provider       Provider
 	ttl            time.Duration
 	db             *sql.DB
@@ -61,6 +70,9 @@ type Lookuper struct {
 // datPath is the path to an optional geoip.dat file. When enableMmap is true,
 // the compact lookup index is file-backed instead of retained on the Go heap.
 func NewLookuper(dbPath string, ttl time.Duration, provider Provider, datPath string, enableMmap bool, updateURL string, updateInterval time.Duration) (*Lookuper, error) {
+	if ttl <= 0 {
+		return nil, fmt.Errorf("geo cache TTL must be positive")
+	}
 	if updateURL != "" && (datPath == "" || updateInterval <= 0) {
 		return nil, fmt.Errorf("geoip.dat update requires a file path and positive interval")
 	}
@@ -110,10 +122,18 @@ func NewLookuper(dbPath string, ttl time.Duration, provider Provider, datPath st
 	}
 
 	// Remove any already-expired entries on startup.
-	_, _ = db.Exec("DELETE FROM geo_cache WHERE expires_at < ?", time.Now().UTC().Format(time.RFC3339))
+	if _, err := db.Exec("DELETE FROM geo_cache WHERE expires_at < ?", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		db.Close()
+		if local != nil {
+			_ = local.Close()
+		}
+		return nil, fmt.Errorf("purging expired geo cache: %w", err)
+	}
 
 	l := &Lookuper{
 		cache:          make(map[uint32]*cacheEntry),
+		v6Cache:        make(map[string]*cacheEntry),
+		flights:        make(map[string]*providerFlight),
 		provider:       provider,
 		ttl:            ttl,
 		db:             db,
@@ -206,15 +226,34 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 	// Extract /24 subnet for cache key.
 	sn, ok := subnet24(ip)
 	if !ok {
-		// IPv6 has no /24 cache; use the local database before the API.
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			return "", "", "", "", false, nil
+		}
+		key := parsed.String()
+		now := time.Now()
+		l.mu.RLock()
+		entry, found := l.v6Cache[key]
+		l.mu.RUnlock()
+		if found && now.Before(entry.ExpiresAt) {
+			return entry.CountryCode, entry.City, entry.ASN, entry.ASName, true, nil
+		}
+		// IPv6 cache is in-memory because the legacy SQLite schema is keyed by
+		// an IPv4 /24 integer.
 		if cc := l.lookupLocal(ip); cc != "" {
 			return cc, "", "", "", false, nil
 		}
 		if l.provider == nil {
 			return "", "", "", "", false, nil
 		}
-		result, err := l.provider.Lookup(context.Background(), ip)
-		return providerValues(result, false, err)
+		result, err := l.lookupProvider("v6:"+key, ip)
+		cc, city, asnVal, asVal, _, lookupErr := providerValues(result, false, err)
+		if lookupErr == nil {
+			l.mu.Lock()
+			l.v6Cache[key] = &cacheEntry{CountryCode: cc, City: city, ASN: asnVal, ASName: asVal, ExpiresAt: now.Add(l.ttl)}
+			l.mu.Unlock()
+		}
+		return cc, city, asnVal, asVal, false, lookupErr
 	}
 
 	// 1. Check in-memory cache.
@@ -251,7 +290,9 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 
 	// Expired entry in SQLite — delete it.
 	if err == nil {
-		_, _ = l.db.Exec("DELETE FROM geo_cache WHERE subnet24 = ?", sn)
+		if _, deleteErr := l.db.Exec("DELETE FROM geo_cache WHERE subnet24 = ?", sn); deleteErr != nil {
+			log.Printf("[geo] deleting expired cache entry %s failed: %v", subnet24ToCIDR(sn), deleteErr)
+		}
 	}
 
 	// 3. Use the local country database without adding its country-only result
@@ -264,20 +305,22 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 	}
 
 	// 4. Use the injected external provider only if the local database misses.
-	result, err := l.provider.Lookup(context.Background(), ip)
+	result, err := l.lookupProvider(fmt.Sprintf("v4:%d", sn), ip)
 	if err != nil {
 		return "", "", "", "", false, err
 	}
 	cc, city, asnVal, asVal, _, _ := providerValues(result, false, nil)
 
-	expireTime := now.Add(7 * 24 * time.Hour)
+	expireTime := now.Add(l.ttl)
 
 	// Store in SQLite (upsert by subnet24).
-	_, _ = l.db.Exec(
+	if _, err := l.db.Exec(
 		`INSERT OR REPLACE INTO geo_cache (subnet24, country_code, city, asn, as_name, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		sn, cc, city, asnVal, asVal, expireTime.Format(time.RFC3339),
-	)
+	); err != nil {
+		return "", "", "", "", false, fmt.Errorf("storing geo cache entry: %w", err)
+	}
 
 	// Store in memory.
 	l.mu.Lock()
@@ -291,6 +334,27 @@ func (l *Lookuper) Lookup(ip string) (countryCode, city, asn, asName string, cac
 	l.mu.Unlock()
 
 	return cc, city, asnVal, asVal, false, nil
+}
+
+func (l *Lookuper) lookupProvider(key, ip string) (ProviderResult, error) {
+	l.flightMu.Lock()
+	if flight := l.flights[key]; flight != nil {
+		l.flightMu.Unlock()
+		<-flight.done
+		return flight.result, flight.err
+	}
+	flight := &providerFlight{done: make(chan struct{})}
+	l.flights[key] = flight
+	l.flightMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	flight.result, flight.err = l.provider.Lookup(ctx, ip)
+	cancel()
+	l.flightMu.Lock()
+	delete(l.flights, key)
+	close(flight.done)
+	l.flightMu.Unlock()
+	return flight.result, flight.err
 }
 
 func providerValues(result ProviderResult, cached bool, err error) (country, region, asn, asnName string, wasCached bool, lookupErr error) {

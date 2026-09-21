@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -74,6 +76,13 @@ FROM dns_defaults WHERE id = 1`).Scan(&d.TTL, &d.Record, &d.Response)
 	if err != nil {
 		return d, fmt.Errorf("loading DNS defaults: %w", err)
 	}
+	if d.TTL <= 0 || uint64(d.TTL) > uint64(^uint32(0)) {
+		return d, fmt.Errorf("loading DNS defaults: invalid TTL %d", d.TTL)
+	}
+	d.Response = strings.ToLower(strings.TrimSpace(d.Response))
+	if d.Response != "refuse" && d.Response != "nxdomain" && d.Response != "servfail" {
+		return d, fmt.Errorf("loading DNS defaults: invalid response %q", d.Response)
+	}
 	return d, nil
 }
 
@@ -138,19 +147,47 @@ func (s *Store) ReplaceZones(zones map[string]*config.ZoneConfig) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := replaceZonesTx(tx, zones); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SaveSnapshot atomically stores defaults and the complete zone set.
+func (s *Store) SaveSnapshot(defaults Defaults, zones map[string]*config.ZoneConfig) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE dns_defaults
+SET default_ttl = ?, default_record = ?, default_response = ? WHERE id = 1`,
+		defaults.TTL, defaults.Record, defaults.Response); err != nil {
+		return fmt.Errorf("saving DNS defaults: %w", err)
+	}
+	if err := replaceZonesTx(tx, zones); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func replaceZonesTx(tx *sql.Tx, zones map[string]*config.ZoneConfig) error {
 	if _, err := tx.Exec("DELETE FROM dns_zones"); err != nil {
 		return err
 	}
-	position := 0
-	for pattern, zone := range zones {
-		data, err := json.Marshal(zone)
+	patterns := make([]string, 0, len(zones))
+	for pattern := range zones {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+	for position, pattern := range patterns {
+		data, err := json.Marshal(zones[pattern])
 		if err != nil {
 			return err
 		}
 		if _, err := tx.Exec("INSERT INTO dns_zones(pattern, data, position) VALUES(?, ?, ?)", pattern, data, position); err != nil {
 			return err
 		}
-		position++
 	}
-	return tx.Commit()
+	return nil
 }

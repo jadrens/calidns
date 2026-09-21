@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -112,7 +113,13 @@ func New(cfg *config.Config) *Resolver {
 		},
 	}
 
-	for pattern, zc := range cfg.Zones {
+	patterns := make([]string, 0, len(cfg.Zones))
+	for pattern := range cfg.Zones {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+	for _, pattern := range patterns {
+		zc := cfg.Zones[pattern]
 		re, mode, err := compilePattern(pattern, zc.Mode)
 		if err != nil {
 			log.Printf("[DEBUG] failed to compile pattern %q with mode %q: %v", pattern, zc.Mode, err)
@@ -127,6 +134,33 @@ func New(cfg *config.Config) *Resolver {
 	}
 
 	return r
+}
+
+// ReplaceZones validates and atomically replaces the complete zone set. It is
+// used by slave synchronization so zones deleted on the master cannot linger.
+func (r *Resolver) ReplaceZones(zones map[string]*config.ZoneConfig) error {
+	patterns := make([]string, 0, len(zones))
+	for pattern := range zones {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+
+	replacement := make([]zoneEntry, 0, len(patterns))
+	for _, pattern := range patterns {
+		zc := zones[pattern]
+		re, mode, err := compilePattern(pattern, zc.Mode)
+		if err != nil {
+			return fmt.Errorf("invalid zone %q: %w", pattern, err)
+		}
+		copyConfig := *zc
+		copyConfig.Mode = mode
+		replacement = append(replacement, zoneEntry{patternStr: pattern, pattern: re, config: &copyConfig})
+	}
+
+	r.mu.Lock()
+	r.zones = replacement
+	r.mu.Unlock()
+	return nil
 }
 
 // UpdateDefaults hot-reloads the server-level default TTL and record behaviour.
@@ -410,6 +444,17 @@ func buildRRs(domain string, qtype uint16, ttl uint32, rs *config.RecordSet) []d
 	}
 
 	var rrs []dns.RR
+	// RFC 1034 aliases must be returned to address queries as well as explicit
+	// CNAME queries so recursive resolvers can continue following the chain.
+	if (qtype == dns.TypeA || qtype == dns.TypeAAAA || qtype == dns.TypeCNAME) && len(rs.CNAME) > 0 {
+		for _, cname := range rs.CNAME {
+			rrs = append(rrs, &dns.CNAME{
+				Hdr:    dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
+				Target: dns.Fqdn(strings.TrimSpace(cname)),
+			})
+		}
+		return rrs
+	}
 
 	switch qtype {
 	case dns.TypeA:
@@ -456,19 +501,6 @@ func buildRRs(domain string, qtype uint16, ttl uint32, rs *config.RecordSet) []d
 					Ttl:    ttl,
 				},
 				Txt: []string{txt},
-			}
-			rrs = append(rrs, rr)
-		}
-	case dns.TypeCNAME:
-		for _, cname := range rs.CNAME {
-			rr := &dns.CNAME{
-				Hdr: dns.RR_Header{
-					Name:   dns.Fqdn(domain),
-					Rrtype: dns.TypeCNAME,
-					Class:  dns.ClassINET,
-					Ttl:    ttl,
-				},
-				Target: dns.Fqdn(cname),
 			}
 			rrs = append(rrs, rr)
 		}
@@ -520,6 +552,30 @@ func appendParsedRRs(rrs []dns.RR, domain string, ttl uint32, rrType string, val
 // ValidateRecordSet rejects malformed structured and generic records before
 // the API stores them. Existing A/AAAA/TXT/CNAME validation is unchanged.
 func ValidateRecordSet(rs RecordSet) error {
+	for _, value := range rs.A {
+		ip := net.ParseIP(strings.TrimSpace(value))
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("invalid A record %q", value)
+		}
+	}
+	for _, value := range rs.AAAA {
+		ip := net.ParseIP(strings.TrimSpace(value))
+		if ip == nil || ip.To4() != nil {
+			return fmt.Errorf("invalid AAAA record %q", value)
+		}
+	}
+	for _, value := range rs.CNAME {
+		name := strings.TrimSpace(value)
+		if name == "" || strings.ContainsAny(name, " \t\r\n") {
+			return fmt.Errorf("invalid CNAME record %q", value)
+		}
+		if _, ok := dns.IsDomainName(dns.Fqdn(name)); !ok {
+			return fmt.Errorf("invalid CNAME record %q", value)
+		}
+	}
+	if len(rs.CNAME) > 0 && (len(rs.A) > 0 || len(rs.AAAA) > 0 || len(rs.TXT) > 0 || len(rs.MX) > 0 || len(rs.NS) > 0 || len(rs.SRV) > 0 || len(rs.CAA) > 0 || len(rs.PTR) > 0 || len(rs.SOA) > 0 || len(rs.Other) > 0) {
+		return fmt.Errorf("CNAME cannot coexist with other record types")
+	}
 	for _, group := range []struct {
 		rrType string
 		values []string

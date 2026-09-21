@@ -84,13 +84,16 @@ func (p *IP2Location) Lookup(ctx context.Context, ip string) (geo.ProviderResult
 		return geo.ProviderResult{}, fmt.Errorf("geo lookup: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return geo.ProviderResult{}, fmt.Errorf("geo read body: %w", err)
 	}
 	var apiErr ip2locationError
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Code != 0 {
 		return geo.ProviderResult{}, fmt.Errorf("geo API error %d: %s", apiErr.Error.Code, apiErr.Error.Message)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return geo.ProviderResult{}, fmt.Errorf("geo API returned HTTP %d", resp.StatusCode)
 	}
 	var result ip2locationResponse
 	if err := json.Unmarshal(body, &result); err != nil {

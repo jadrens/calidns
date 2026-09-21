@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,7 +135,7 @@ func New(dbType, dsn string, geo GeoLookup) (*Recorder, error) {
 		city TEXT DEFAULT 'empty',
 		geo_cached BOOLEAN NOT NULL DEFAULT FALSE,
 		edns_included BOOLEAN NOT NULL DEFAULT FALSE,
-		asn INTEGER DEFAULT NULL,
+		asn TEXT DEFAULT NULL,
 		as_name TEXT DEFAULT 'empty',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
@@ -148,7 +147,7 @@ func New(dbType, dsn string, geo GeoLookup) (*Recorder, error) {
 		subnet INET DEFAULT NULL,
 		country_code TEXT NOT NULL DEFAULT 'NO',
 		city TEXT NOT NULL DEFAULT 'empty',
-		asn INTEGER DEFAULT NULL,
+		asn TEXT DEFAULT NULL,
 		as_name TEXT DEFAULT 'empty',
 		nsid TEXT NOT NULL DEFAULT 'empty',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -160,6 +159,27 @@ func New(dbType, dsn string, geo GeoLookup) (*Recorder, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
+	}
+	if dbType == "postgres" {
+		// Older CaliDNS releases created ASN columns as INTEGER even though the
+		// provider and public API model ASN values as strings. Migrate existing
+		// installations before writers start so empty and vendor-formatted ASN
+		// values cannot make every query insert fail.
+		for _, table := range []string{"queries", "edns"} {
+			var dataType string
+			err := db.QueryRow(`SELECT data_type FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = $1 AND column_name = 'asn'`, table).Scan(&dataType)
+			if err != nil {
+				db.Close()
+				return nil, fmt.Errorf("checking %s ASN schema: %w", table, err)
+			}
+			if dataType != "text" {
+				if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ALTER COLUMN asn TYPE TEXT USING asn::TEXT", table)); err != nil {
+					db.Close()
+					return nil, fmt.Errorf("migrating %s ASN schema: %w", table, err)
+				}
+			}
+		}
 	}
 
 	const numWorkers = 4
@@ -196,10 +216,13 @@ func New(dbType, dsn string, geo GeoLookup) (*Recorder, error) {
 
 // Enqueue adds an entry to the write queue.
 func (r *Recorder) Enqueue(e *Entry) {
-
 	select {
 	case r.ch <- e:
 	default:
+		dropped := atomic.AddInt64(&r.dropped, 1)
+		if dropped == 1 || dropped%100 == 0 {
+			log.Printf("[recorder] input queue full (dropped=%d)", dropped)
+		}
 	}
 }
 
@@ -220,18 +243,27 @@ func (r *Recorder) QueueLen() int {
 	return len(r.ch)
 }
 
-// GetStats returns recorder statistics.
-func (r *Recorder) GetStats() Stats {
+// GetStats returns recorder statistics and reports database failures.
+func (r *Recorder) GetStats() (Stats, error) {
 	var total, hits int64
-	_ = r.db.QueryRow("SELECT COUNT(*) FROM queries").Scan(&total)
-	_ = r.db.QueryRow("SELECT COUNT(*) FROM queries WHERE geo_cached = TRUE").Scan(&hits)
+	if err := r.db.QueryRow("SELECT COUNT(*) FROM queries").Scan(&total); err != nil {
+		return Stats{}, fmt.Errorf("counting queries: %w", err)
+	}
+	if err := r.db.QueryRow("SELECT COUNT(*) FROM queries WHERE geo_cached = TRUE").Scan(&hits); err != nil {
+		return Stats{}, fmt.Errorf("counting cache hits: %w", err)
+	}
 
 	return Stats{
 		QueueLen:     len(r.ch),
 		TotalQueries: total,
 		CacheHited:   hits,
 		Dropped:      atomic.LoadInt64(&r.dropped),
-	}
+	}, nil
+}
+
+// Ping verifies that the recorder database is reachable.
+func (r *Recorder) Ping() error {
+	return r.db.Ping()
 }
 
 // QueryHistory returns paginated query history with optional filters.
@@ -338,7 +370,7 @@ func (r *Recorder) QueryHistory(id int64, domain, clientIP, subnet, countryCode,
 		if err := rows.Scan(&e.ID, &e.Domain, &e.QueryType, &e.ClientIP, &e.CountryCode, &e.City, &e.GeoCached,
 			&asn, &asName, &e.CreatedAt,
 			&ednsSubnet, &ednsCC, &ednsCity, &ednsASN, &ednsASName, &nsid); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning query history: %w", err)
 		}
 		e.ASN = asn
 		e.ASName = asName
@@ -349,6 +381,9 @@ func (r *Recorder) QueryHistory(id int64, domain, clientIP, subnet, countryCode,
 		e.EDNSASName = ednsASName
 		e.NSID = nsid
 		items = append(items, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating query history: %w", err)
 	}
 
 	return &QueryResult{Total: int(total), Items: items}, nil
@@ -441,11 +476,14 @@ func (r *Recorder) QueryEDNS(id int64, subnet, countryCode, nsid, start, end str
 		var ednsASN, ednsASName string
 		if err := rows.Scan(&rec.ID, &rec.Domain, &rec.QueryType, &rec.ClientIP,
 			&rec.CountryCode, &rec.City, &rec.Subnet, &rec.EDNSCountryCode, &rec.EDNSCity, &ednsASN, &ednsASName, &rec.NSID, &rec.CreatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning EDNS history: %w", err)
 		}
 		rec.EDNSASN = ednsASN
 		rec.EDNSASName = ednsASName
 		items = append(items, &rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating EDNS history: %w", err)
 	}
 
 	return &EDNSResult{Total: int(total), Items: items}, nil
@@ -664,8 +702,8 @@ func (r *Recorder) insertOne(e *Entry) {
 
 	if err != nil {
 		dropped := atomic.AddInt64(&r.dropped, 1)
-		// Throttled logging: log every 100th drop to avoid log-storm I/O.
-		if dropped%100 == 1 {
+		// Log the first failure and then every 100th drop to avoid log storms.
+		if dropped == 1 || dropped%100 == 0 {
 			log.Printf("[recorder] insert failed (dropped=%d): %v", dropped, err)
 		}
 		return
@@ -690,14 +728,7 @@ func (r *Recorder) geoRetryWorker() {
 	for {
 		select {
 		case <-r.stop:
-			for {
-				select {
-				case job := <-r.retryCh:
-					r.retryGeo(job)
-				default:
-					return
-				}
-			}
+			return
 		case job := <-r.retryCh:
 			r.retryGeo(job)
 		}
@@ -713,7 +744,13 @@ func (r *Recorder) retryGeo(job *geoRetryJob) {
 
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(30 * time.Second)
+			timer := time.NewTimer(30 * time.Second)
+			select {
+			case <-timer.C:
+			case <-r.stop:
+				timer.Stop()
+				return
+			}
 		}
 
 		cc, city, asn, asName, _, err := r.geo.Lookup(job.ClientIP)
@@ -751,20 +788,11 @@ func (r *Recorder) retryGeo(job *geoRetryJob) {
 	log.Printf("[recorder] geo retry exhausted: id=%d ip=%s", job.QueryID, job.ClientIP)
 }
 
-// subnetFirstIPFromCIDR returns the first usable IP in a CIDR subnet.
+// subnetFirstIPFromCIDR returns the masked IPv4 or IPv6 network address.
 func subnetFirstIPFromCIDR(cidr string) string {
-	parts := strings.SplitN(cidr, "/", 2)
-	if len(parts) != 2 {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
 		return ""
 	}
-	ip := net.ParseIP(parts[0])
-	if ip == nil {
-		return ""
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return ""
-	}
-	ip4[3] = 1
-	return ip4.String()
+	return network.IP.String()
 }
